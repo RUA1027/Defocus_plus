@@ -137,9 +137,9 @@ training:
   # 三阶段训练计划 (Stage 1/2/3)
   # 总计 300 Epochs: 50 + 200 + 50
   stage_schedule:
-    stage1_epochs: 20              # Stage 1: Physics Only (物理层单独训练)
-    stage2_epochs: 80            # Stage 2: Restoration with Fixed Physics (复原网络训练)
-    stage3_epochs: 50             # Stage 3: Joint Fine-tuning (联合微调，学习率减半)
+    stage1_epochs: 0              # Stage 1: Physics Only (物理层单独训练)
+    stage2_epochs: 0            # Stage 2: Restoration with Fixed Physics (复原网络训练)
+    stage3_epochs: 150             # Stage 3: Joint Fine-tuning (联合微调，学习率减半)
   
   # 正则化采样
   smoothness_grid_size: 16       # TV 损失计算的网格大小
@@ -191,7 +191,7 @@ visualization:
 # 实验配置 (Experiment)
 # -----------------------------------------------------------------------------
 experiment:
-  name: "dpdd_physics_driven_train_3"    # 实验名称
+  name: "ablation_3_end_to_end"    # 实验名称
   seed: 42                       # 随机种子
   device: "cuda"                 # 计算设备: "cuda" 或 "cpu"
   use_physical_layer: true       # 是否启用物理层

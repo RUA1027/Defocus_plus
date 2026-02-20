@@ -72,7 +72,7 @@ restoration_net:
   base_filters: 64               # 基础滤波器数量 (原96过大导致显存和计算压力)
   bilinear: true                 # 上采样方式: true=双线性插值, false=转置卷积
   use_coords: true               # 是否启用坐标注入 (CoordConv)
-  use_physics_injection: true     # 是否将 Zernike 系数图注入复原网络
+  use_physics_injection: false     # 是否将 Zernike 系数图注入复原网络
   injection_grid_size: 16         # 系数图采样网格大小
   
   # U-Net 架构配置 (通道倍数)
@@ -135,11 +135,10 @@ training:
   accumulation_steps: 4          # 梯度累积步数，模拟更大的 Batch Size
 
   # 三阶段训练计划 (Stage 1/2/3)
-  # 总计 300 Epochs: 50 + 200 + 50
   stage_schedule:
     stage1_epochs: 20              # Stage 1: Physics Only (物理层单独训练)
-    stage2_epochs: 80            # Stage 2: Restoration with Fixed Physics (复原网络训练)
-    stage3_epochs: 50             # Stage 3: Joint Fine-tuning (联合微调，学习率减半)
+    stage2_epochs: 80              # Stage 2: Restoration with Fixed Physics (复原网络训练)
+    stage3_epochs: 50              # Stage 3: Joint Fine-tuning (联合微调，学习率减半)
   
   # 正则化采样
   smoothness_grid_size: 16       # TV 损失计算的网格大小
@@ -191,7 +190,7 @@ visualization:
 # 实验配置 (Experiment)
 # -----------------------------------------------------------------------------
 experiment:
-  name: "dpdd_physics_driven_train_3"    # 实验名称
+  name: "ablation_1_no_physics"    # 实验名称
   seed: 42                       # 随机种子
   device: "cuda"                 # 计算设备: "cuda" 或 "cpu"
   use_physical_layer: true       # 是否启用物理层
