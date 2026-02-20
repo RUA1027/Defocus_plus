@@ -31,7 +31,6 @@ ola:
   patch_size: 128                 # 补丁大小
   stride: 64                     # 补丁步长 (50% 重叠)
   pad_to_power_2: true           # FFT 是否填充到 2 的幂
-  use_newbp: false                # 是否启用 NewBP 算法 (非对角雅可比)
 
 # -----------------------------------------------------------------------------
 # 像差预测网络 (Aberration Network)
@@ -42,12 +41,7 @@ aberration_net:
   n_coeffs: 36                   # 输出 Zernike 系数数量
   a_max: 1.5                     # 系数约束范围 [-a_max, a_max]
   
-  # 网络类型: "polynomial" 或 "mlp"
-  type: "mlp"
   
-  # PolynomialAberrationNet 专用参数
-  polynomial:
-    degree: 2                    # 多项式阶数 (2 阶 = 6 项)
   
   # AberrationNet (MLP) 专用参数
   # 输入坐标 (x,y)->傅里叶特征编码->4层全连接网络->Tanh 物理约束->Zernike 系数
@@ -58,10 +52,8 @@ aberration_net:
     use_fourier: true            # 是否使用傅里叶特征编码
     # 将 2 维坐标映射到高维空间,用 Fourier Encoding 解决坐标输入的频谱缺陷.
     fourier_scale: 5             # 傅里叶特征缩放因子
-    a_max_mlp: 1.5               # MLP 版本的系数范围 (通常比 polynomial 更大)
+    a_max_mlp: 1.5               # MLP 版本的系数范围
 
-# Polynomial (多项式)：它无法表达局部的突变。它会试图用一条平滑曲线去拟合局部瑕疵，结果就是“平均化”了错误，导致整体都不准确。
-# MLP (神经网络)：由于它具有拟合任意函数的能力（Universal Approximation Theorem），可以更好地捕捉局部的复杂变化，从而提高像差预测的精度。
 
 # -----------------------------------------------------------------------------
 # 图像复原网络 (Restoration Network - U-Net)

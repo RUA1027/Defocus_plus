@@ -65,17 +65,10 @@ class OLAConfig:
     patch_size: int = 128
     stride: int = 64
     pad_to_power_2: bool = True
-    use_newbp: bool = True
     
     def __post_init__(self):
         if self.stride > self.patch_size:
             raise ValueError(f"stride ({self.stride}) 不能大于 patch_size ({self.patch_size})")
-
-
-@dataclass
-class PolynomialConfig:
-    """多项式像差网络配置"""
-    degree: int = 2
 
 
 @dataclass
@@ -89,16 +82,10 @@ class MLPConfig:
 
 @dataclass
 class AberrationNetConfig:
-    """像差预测网络配置"""
+    """像差预测网络配置 (MLP)"""
     n_coeffs: int = 15
     a_max: float = 2.0
-    type: str = "polynomial"  # "polynomial" 或 "mlp"
-    polynomial: PolynomialConfig = field(default_factory=PolynomialConfig)
     mlp: MLPConfig = field(default_factory=MLPConfig)
-    
-    def __post_init__(self):
-        if self.type not in ["polynomial", "mlp"]:
-            raise ValueError(f"type 必须是 'polynomial' 或 'mlp'，当前值: {self.type}")
 
 
 @dataclass
@@ -418,13 +405,10 @@ def _build_config_from_dict(data: Dict[str, Any]) -> Config:
     
     # 处理 aberration_net 的嵌套
     ab_data = data.get('aberration_net', {})
-    polynomial = _dict_to_dataclass(PolynomialConfig, ab_data.get('polynomial', {}))
     mlp = _dict_to_dataclass(MLPConfig, ab_data.get('mlp', {}))
     aberration_net = AberrationNetConfig(
         n_coeffs=ab_data.get('n_coeffs', 15),
         a_max=ab_data.get('a_max', 2.0),
-        type=ab_data.get('type', 'polynomial'),
-        polynomial=polynomial,
         mlp=mlp
     )
     

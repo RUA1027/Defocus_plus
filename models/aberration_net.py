@@ -35,62 +35,6 @@ class FourierFeatureEncoding(nn.Module):
         # 非线性映射：对投影后的结果分别取正弦和余弦
         return torch.cat([torch.sin(xp), torch.cos(xp)], dim=-1)
 
-class PolynomialAberrationNet(nn.Module):
-    # 物理约束下的像差建模器，建立像差的解析模型
-    # 通过 解析几何（多项式曲面） 的方式去“逼近”真实的像差分布。
-    # 将复杂的像差学习任务，简化为寻找一组能描述光学系统全局特性的多项式系数。
-    # 这使得模型在面对噪声较多的图像时，依然能提取出最本质的退化规律。
-    """
-    Models the collection of Zernike coefficients as a polynomial surface over the image coordinates.
-    C_j(x, y) = sum_k W_jk * P_k(x, y)
-    This enforces infinite smoothness and reduces the number of parameters.
-    """
-    def __init__(self, n_coeffs, degree, a_max):
-        super().__init__()
-        self.n_coeffs = n_coeffs
-        self.degree = degree
-        self.a_max = a_max
-        
-        # Calculate number of polynomial terms for 2D degree d
-        # Terms: 1, x, y, x^2, xy, y^2, ...
-        # Count = (d+1)(d+2)/2
-        self.n_poly_terms = (degree + 1) * (degree + 2) // 2
-        
-        # Learnable weights: [n_coeffs, n_poly_terms]
-        # We initialize them to small values.
-        # Initialize bias (constant term) to 0 or small random
-        self.poly_weights = nn.Parameter(torch.randn(n_coeffs, self.n_poly_terms) * 0.01)
-        
-    def forward(self, coords):
-        """
-        coords: [B, 2] in range [-1, 1] (y, x)
-        Returns: [B, n_coeffs]
-        """
-        B = coords.shape[0]
-        y = coords[:, 0]
-        x = coords[:, 1]
-        
-        # Construct polynomial basis terms [B, n_terms]
-        terms = []
-        for d in range(self.degree + 1):
-            for i in range(d + 1):
-                # x^i * y^(d-i)
-                term = (x ** i) * (y ** (d - i))
-                terms.append(term)
-        
-        basis = torch.stack(terms, dim=1) # [B, n_poly_terms]
-        
-        # Support variable batch size
-        # Coeffs = Basis @ Weights.T
-        # [B, n_terms] @ [n_terms, n_coeffs] -> [B, n_coeffs]
-        raw_coeffs = torch.matmul(basis, self.poly_weights.t())
-        
-        # Constraints
-        # 防止了在优化过程中系数失控，导致生成的点扩散函数（PSF）变得极其离谱。
-        coeffs = self.a_max * torch.tanh(raw_coeffs)
-        
-        return coeffs
-
 class AberrationNet(nn.Module):
     # 基于 MLP 的像差建模器，通过神经网络直接学习坐标到像差系数的映射关系
     # 它的主要任务是根据输入的图像坐标，预测出对应位置的像差系数。

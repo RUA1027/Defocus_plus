@@ -94,7 +94,6 @@ import torch.fft
 import math
 from .zernike import DifferentiableZernikeGenerator
 from .aberration_net import AberrationNet
-from .newbp_convolution import NewBPConvolutionFunction
 '''
 ┌─────────────────────────────────────────────────────────────┐
 │ 输入: x_hat [B, C, H, W]                                      │
@@ -168,17 +167,13 @@ class SpatiallyVaryingPhysicalLayer(nn.Module):
                  aberration_net: nn.Module,
                  zernike_generator: DifferentiableZernikeGenerator,
                  patch_size,
-                 stride,
-                 pad_to_power_2=True,
-                 use_newbp=False):
+                 stride):
         super().__init__()
         self.aberration_net = aberration_net
         self.zernike_generator = zernike_generator
         self.patch_size = patch_size
         self.stride = stride
         self.kernel_size = zernike_generator.kernel_size
-        self.pad_to_power_2 = pad_to_power_2
-        self.use_newbp = use_newbp
         
         # 可学习的 Gamma 参数
         # 物理卷积必须在线性光域进行，sRGB 图像需要先反 Gamma 变换
@@ -546,80 +541,60 @@ reshape → [B*N_patches, C, P, P]
             raise ValueError(f"Channel mismatch: Input ({C}) and Kernel ({C_k}) are not compatible for broadcasting.")
         
         # 4. Convolution Implementation
-        # 卷积实现：根据配置选择基于 FFT 的 NewBP 算子或高效的空间域卷积
+        # 卷积实现：使用 PyTorch 原生空域卷积 (cuDNN 优化)
         
-        if self.use_newbp:
-            # -------------------------------------------------------------------------
-            # NewBP Mode: Custom FFT-based Convolution
-            # 仅在需要使用 NewBP 自定义反向传播算子时（科研需求），才进行 FFT 相关计算
-            # -------------------------------------------------------------------------
-            fft_size = P + K - 1
-            if self.pad_to_power_2:
-                fft_size = 2 ** math.ceil(math.log2(fft_size))
-
-            # Use NewBP custom autograd function
-            # This implements backward pass with explicit non-diagonal Jacobian
-            y_patches_result = NewBPConvolutionFunction.apply(
-                patches, kernels, K, P, fft_size
-            )
-            # Determine C_out from result
-            assert isinstance(y_patches_result, torch.Tensor), "NewBP output must be Tensor"
-            y_patches = y_patches_result
-            C_out = y_patches.shape[1]
-
-        else:
-            # -------------------------------------------------------------------------
-            # Spatial Domain Convolution (GPU-optimized via cuDNN)
-            # 空间域卷积：在 GPU 上直接进行卷积运算
-            # 完全省略傅里叶变换步骤。对于小尺寸卷积核 (如 31x31)，这比 FFT 转换快得多，
-            # 且能充分利用 GPU 的并行计算能力。
-            # -------------------------------------------------------------------------
+        # -------------------------------------------------------------------------
+        # Spatial Domain Convolution (GPU-optimized via cuDNN)
+        # 空间域卷积：在 GPU 上直接进行卷积运算
+        # 完全省略傅里叶变换步骤。对于小尺寸卷积核 (如 31x31)，这比 FFT 转换快得多，
+        # 且能充分利用 GPU 的并行计算能力。
+        # -------------------------------------------------------------------------
+        
+        # Flip kernel for F.conv2d (Correlation -> Convolution)
+        # 注意：F.conv2d 计算的是相关性 (Correlation)，而物理光学定义的是卷积 (Convolution)
+        # 因此需要在空间域对卷积核进行上下左右翻转。
+        kernels_flipped = torch.flip(kernels, dims=[-2, -1])
+        
+        # 使用 Grouped Convolution 实现动态卷积 (Dynamic Convolution)
+        # 将 Batch 中每个样本的 Patch 与其对应的 Kernel 进行卷积
+        BN = patches.shape[0]  # B * N_patches
+        pad = K // 2
+        
+        # Pad input patches to maintain size: P x P -> P x P
+        patches_padded = F.pad(patches, (pad, pad, pad, pad), mode='constant', value=0)
+        
+        if C == C_k:
+            # Case 1: Same channels (Color -> Color)
+            # 使用 grouped convolution: groups=BN*C，实现每个通道独立的局部卷积
+            patches_grouped = patches_padded.view(1, BN * C,
+                                                   patches_padded.shape[2],
+                                                   patches_padded.shape[3])
+            kernels_grouped = kernels_flipped.view(BN * C, 1, K, K)
+            y_grouped = F.conv2d(patches_grouped, kernels_grouped, groups=BN * C)
+            y_patches = y_grouped.view(BN, C, P, P)
+            C_out = C
             
-            # Flip kernel for F.conv2d (Correlation -> Convolution)
-            # 注意：F.conv2d 计算的是相关性 (Correlation)，而物理光学定义的是卷积 (Convolution)
-            # 因此需要在空间域对卷积核进行上下左右翻转。
-            kernels_flipped = torch.flip(kernels, dims=[-2, -1])
+        elif C == 1 and C_k > 1:
+            # Case 2: Grayscale input -> Multi-channel Kernel (e.g., BW -> RGB aberration)
+            patches_expanded = patches_padded.expand(-1, C_k, -1, -1)
+            patches_grouped = patches_expanded.reshape(1, BN * C_k,
+                                                        patches_padded.shape[2],
+                                                        patches_padded.shape[3])
+            kernels_grouped = kernels_flipped.view(BN * C_k, 1, K, K)
+            y_grouped = F.conv2d(patches_grouped, kernels_grouped, groups=BN * C_k)
+            y_patches = y_grouped.view(BN, C_k, P, P)
+            C_out = C_k
             
-            # 使用 Grouped Convolution 实现动态卷积 (Dynamic Convolution)
-            # 将 Batch 中每个样本的 Patch 与其对应的 Kernel 进行卷积
-            BN = patches.shape[0]  # B * N_patches
-            pad = K // 2
-            
-            # Pad input patches to maintain size: P x P -> P x P
-            patches_padded = F.pad(patches, (pad, pad, pad, pad), mode='constant', value=0)
-            
-            if C == C_k:
-                # Case 1: Same channels (Color -> Color)
-                # 使用 grouped convolution: groups=BN*C，实现每个通道独立的局部卷积
-                patches_grouped = patches_padded.view(1, BN * C,
-                                                       patches_padded.shape[2],
-                                                       patches_padded.shape[3])
-                kernels_grouped = kernels_flipped.view(BN * C, 1, K, K)
-                y_grouped = F.conv2d(patches_grouped, kernels_grouped, groups=BN * C)
-                y_patches = y_grouped.view(BN, C, P, P)
-                C_out = C
-                
-            elif C == 1 and C_k > 1:
-                # Case 2: Grayscale input -> Multi-channel Kernel (e.g., BW -> RGB aberration)
-                patches_expanded = patches_padded.expand(-1, C_k, -1, -1)
-                patches_grouped = patches_expanded.reshape(1, BN * C_k,
-                                                            patches_padded.shape[2],
-                                                            patches_padded.shape[3])
-                kernels_grouped = kernels_flipped.view(BN * C_k, 1, K, K)
-                y_grouped = F.conv2d(patches_grouped, kernels_grouped, groups=BN * C_k)
-                y_patches = y_grouped.view(BN, C_k, P, P)
-                C_out = C_k
-                
-            else:  # C > 1 and C_k == 1
-                # Case 3: Multi-channel input -> Single Kernel (e.g., RGB -> Scalar aberration)
-                kernels_expanded = kernels_flipped.expand(-1, C, -1, -1)
-                patches_grouped = patches_padded.view(1, BN * C,
-                                                       patches_padded.shape[2],
-                                                       patches_padded.shape[3])
-                kernels_grouped = kernels_expanded.reshape(BN * C, 1, K, K)
-                y_grouped = F.conv2d(patches_grouped, kernels_grouped, groups=BN * C)
-                y_patches = y_grouped.view(BN, C, P, P)
-                C_out = C
+        else:  # C > 1 and C_k == 1
+            # Case 3: Multi-channel input -> Single Kernel (e.g., RGB -> Scalar aberration)
+            kernels_expanded = kernels_flipped.expand(-1, C, -1, -1)
+            patches_grouped = patches_padded.view(1, BN * C,
+                                                   patches_padded.shape[2],
+                                                   patches_padded.shape[3])
+            kernels_grouped = kernels_expanded.reshape(BN * C, 1, K, K)
+            y_grouped = F.conv2d(patches_grouped, kernels_grouped, groups=BN * C)
+            y_patches = y_grouped.view(BN, C, P, P)
+            C_out = C
         
         # 5. Apply Window and Fold
         # Explicit dimension expansion for window
