@@ -71,6 +71,17 @@ from utils.metrics import PerformanceEvaluator
 from trainer import DualBranchTrainer
 
 
+def _sanitize_for_json(obj):
+    """递归地将 NaN/Inf 替换为 None，使输出符合 JSON 标准（RFC 8259）。"""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    return obj
+
+
 def count_params(model):
     """统计模型参数量"""
     return sum(p.numel() for p in model.parameters())
@@ -166,6 +177,8 @@ def main():
                         help='Path to model checkpoint')
     parser.add_argument('--config', '-c', type=str, default='config/default.yaml',
                         help='Path to config file')
+    parser.add_argument('--data-root', type=str, default=None,
+                        help='Override data root directory for OOD/custom datasets (default: use config value)')
     parser.add_argument('--output', '-o', type=str, default=None,
                         help='Output directory for results (default: results/test_<timestamp>)')
     parser.add_argument('--save-images', action='store_true',
@@ -191,6 +204,11 @@ def main():
     # 加载配置
     print(f"Loading config from {args.config}...")
     config = load_config(args.config)
+    
+    # 如果指定了 --data-root，覆盖配置中的数据集路径
+    if args.data_root is not None:
+        config.data.data_root = args.data_root
+        print(f"Override data root to: {args.data_root}")
     
     # 设置设备
     device = config.experiment.device
@@ -413,13 +431,13 @@ def main():
     # 保存详细结果
     results_path = os.path.join(output_dir, 'test_results.json')
     with open(results_path, 'w') as f:
-        json.dump({
+        json.dump(_sanitize_for_json({
             'average_metrics': avg_metrics,
             'model_stats': model_stats,
             'per_image_results': results,
             'checkpoint': args.checkpoint,
             'config': args.config
-        }, f, indent=2)
+        }), f, indent=2, allow_nan=False)
     print(f"\n✓ Detailed results saved to: {results_path}")
     
     # 保存摘要为 CSV
@@ -427,8 +445,10 @@ def main():
     with open(csv_path, 'w') as f:
         f.write("filename,PSNR,SSIM,MAE,LPIPS,Reblur_MSE\n")
         for r in results:
-            f.write(f"{r['filename']},{r['PSNR']:.6f},{r['SSIM']:.6f},"
-                    f"{r['MAE']:.6f},{r['LPIPS']:.6f},{r['Reblur_MSE']:.6f}\n")
+            def _fmt(v):
+                return "" if (v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v)))) else f"{v:.6f}"
+            f.write(f"{r['filename']},{_fmt(r['PSNR'])},{_fmt(r['SSIM'])},"
+                    f"{_fmt(r['MAE'])},{_fmt(r['LPIPS'])},{_fmt(r['Reblur_MSE'])}\n")
     print(f"✓ CSV results saved to: {csv_path}")
     
     # 打印最佳/最差样本
