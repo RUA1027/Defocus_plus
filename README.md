@@ -1,305 +1,146 @@
-# Physics-Driven Blind Deconvolution Network
+# 物理驱动盲去卷积网络 (Physics-Driven Blind Deconvolution Network)
 
-A PyTorch implementation of a physics-driven blind deconvolution network for restoring images blurred by spatially varying optical aberrations. The blur is modeled using Zernike polynomials to parameterize wavefront aberrations, which are then converted to point spread functions (PSFs) through differentiable Fourier optics.
+本项目是一个基于 PyTorch 实现的物理驱动盲去卷积网络，专门用于复原由空间变化的光学像差导致的模糊图像。该模型利用 Zernike 多项式参数化波前像差，通过可微傅里叶光学将其转换为点扩散函数 (PSF)，并结合深度学习网络实现高质量的图像复原。
 
-## Overview
+## 核心特性
 
-This implementation features:
+- **双分支架构**: 图像复原网络 (RestorationNet, U-Net) + 光学辨识网络 (AberrationNet, MLP)。
+- **可微物理层**: Zernike 系数 → 波前相位 → PSF → 空间变化卷积 (基于 Overlap-Add 和 FFT 高效实现)。
+- **三阶段解耦训练**: 物理层预训练 → 固定物理层训练复原网络 → 联合微调，确保物理模型的准确性和训练的稳定性。
+- **熔断机制 (Circuit Breaker)**: 严格的质量阈值控制阶段切换，防止过早进入下一阶段导致误差放大。
+- **自监督物理约束**: 通过重模糊一致性损失 (Reblurring Consistency Loss) 实现无监督的 PSF 估计。
+- **极端 OOD 数据集生成**: 提供脚本生成极端像差数据集，用于测试模型的泛化能力。
 
-- **Dual-branch architecture**: Image restoration network + Optics identification network
-- **Differentiable physics layer**: Zernike → Wavefront → PSF → Spatially-varying convolution
-- **3-Stage Decoupled Training**: Physics Only → Restoration → Joint Optimization
-- **TensorBoard Integration**: Visualizing metrics, gradients, and images during training
-- **Circuit Breaker**: Quality thresholds to gate training stage transitions
-- **Self-supervised physics training**: Reblurring consistency loss allows accurate PSF estimation
+## 系统架构
 
-## Architecture
-
-```
-Input (Blurred Y) 
-    ↓
-    ├─→ RestorationNet (U-Net) ─→ Restored X̂
-    │                                    ↓
-    └─→ AberrationNet (MLP)              │
-         ↓                               │
-    Zernike Coefficients                 │
-         ↓                               │
-    PSF Generation (FFT)                 │
-         ↓                               │
-    Spatially-Varying Blur ←─────────────┘
-         ↓
-    Reblurred Ŷ
-         ↓
-    Loss = MSE(Ŷ, Y)
+```text
+输入模糊图像 (Y) 
+    │
+    ├─▶ RestorationNet (U-Net) ──▶ 复原图像 (X̂)
+    │                                  │
+    └─▶ AberrationNet (MLP)            │
+             │                         │
+        Zernike 系数                   │
+             │                         │
+        PSF 生成 (FFT)                 │
+             │                         │
+        空间变化模糊 ◀─────────────────┘
+             │
+        重模糊图像 (Ŷ)
+             │
+        Loss = MSE(Ŷ, Y) + L1(X̂, X_gt)
 ```
 
-## Installation
+## 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Quick Start
+## 快速开始
 
-### Training
+### 1. 数据准备 (DPDD 数据集)
 
-The training process uses a **3-Stage Decoupled Strategy** (Physics -> Restoration -> Joint) to ensure stability and physical accuracy.
+将 DPDD 数据集放置在 `data/dd_dp_dataset_png/` 目录下。目录结构如下：
+```text
+data/dd_dp_dataset_png/
+    train_c/
+        source/ (模糊图像)
+        target/ (清晰图像)
+    val_c/
+        source/
+        target/
+    test_c/
+        source/
+        target/
+```
+*注：本项目直接从 source/target 文件夹读取数据，无需额外的缩放预处理。*
+
+### 2. 模型训练
+
+训练过程采用**三阶段解耦策略**，由 `trainer.py` 中的 `DualBranchTrainer` 控制。
 
 ```bash
-# Standard Training (Uses config/default.yaml)
-python train.py
-
-# Specify Configuration File
+# 使用默认配置进行标准训练
 python train.py --config config/default.yaml
 
-# Resume from Checkpoint
+# 从检查点恢复训练
 python train.py --resume results/latest.pt
+
+# 指定训练特定阶段 (1, 2, 3 或 all)
+python train.py --stage all
 ```
 
-**Training Stages:**
-1. **Stage 1 (Physics Only)**: Trains `AberrationNet` using Re-blur Consistency Loss. Validates via Re-blur MSE.
-2. **Stage 2 (Restoration)**: Freezes physics, trains `RestorationNet` using paired data. Validates via PSNR & SSIM.
-3. **Stage 3 (Joint Finetuning)**: Unfreezes all modules, learning rate halved. Validates via Combined Metric.
+**训练阶段说明:**
+1. **Stage 1 (Physics Only)**: 仅训练 `AberrationNet`，利用重模糊一致性损失拟合光学像差。验证指标：Re-blur MSE。
+2. **Stage 2 (Restoration)**: 冻结物理层，训练 `RestorationNet`。验证指标：PSNR & SSIM。
+3. **Stage 3 (Joint Finetuning)**: 解冻所有模块，学习率减半进行联合微调。验证指标：综合指标。
 
-**Circuit Breaker Mechanism:**
-The system uses strict quality thresholds to prevent premature stage transitions:
-- To enter Stage 2: Physics Re-blur MSE must be < `0.005`.
-- To enter Stage 3: Restoration PSNR > `30.0` AND SSIM > `0.95`.
-- If thresholds are not met, the current stage continues training.
+### 3. 模型测试
 
-### Testing (Full Resolution)
-
-Evaluate the model on the full-resolution test set (1680 x 1120).
+在全分辨率 (1680 x 1120) 测试集上评估模型性能。
 
 ```bash
-# Evaluate using the best joint model
-python test.py --checkpoint results/best_stage3_combined.pt --config config/default.yaml --save-images
+# 使用联合微调后的最佳模型进行测试，并保存复原图像
+python test.py --checkpoint results/best_stage3_joint.pt --config config/default.yaml --save-restored
 
-# Evaluate using the best restoration model (from Stage 2)
-python test.py --checkpoint results/best_stage2_psnr.pt --save-restored
+# 仅评估指标，不保存图像
+python test.py --checkpoint results/best_stage2_psnr.pt
 ```
+测试结果将保存在 `results/` 目录下，包含详细的 `test_results.csv` (PSNR, SSIM, LPIPS, Reblur_MSE) 和可视化对比图。
 
-This will generate:
-- CSV report (`test_results.csv`) with PSNR, SSIM, LPIPS, Reblur_MSE for every image.
-- Visual comparisons in `results/test_<timestamp>/comparisons`.
+### 4. 极端 OOD 数据集生成
 
-### Data Preparation (DPDD Dataset)
-
-1. Place the DPDD dataset in `data/dd_dp_dataset_png/`. Structure:
-   ```
-   data/dd_dp_dataset_png/
-       train_c/
-           source/ (blur)
-           target/ (sharp)
-       val_c/
-       test_c/
-   ```
-2. Verify data integrity (Optional):
-   ```bash
-   python data/preprocess_dpdd.py
-   ```
-   *Note: This implementation reads directly from the source folders. No resizing preprocessing is required.*
-
-### Run Tests
+本项目提供了一个脚本，用于生成具有极端空间变化像差（如严重边缘崩坏、强彗差和像散）的测试集，以评估模型的鲁棒性。
 
 ```bash
-# Test PSF energy conservation
-python -m tests.test_psf_normalization
-
-# Test gradient flow through physics layer
-python -m tests.test_backward_flow
-
-# Test NewBP custom autograd function
-python -m tests.test_newbp_jacobian
+python generate_extreme_ood_dataset.py
 ```
 
-## File Structure
+## 目录结构
 
-```
-defocus/
-├── config/                   # Configuration files (YAML)
-├── data/                     # Data loading and preprocessing
-│   └── preprocess_dpdd.py    # DPDD dataset preparation script
-├── models/
-│   ├── __init__.py           # Module exports
-│   ├── zernike.py            # Zernike basis & PSF generation
-│   ├── newbp_convolution.py  # Custom Autograd for physics-aware gradients
-│   ├── physical_layer.py     # OLA spatially-varying convolution
-│   ├── aberration_net.py     # MLP for Zernike coefficients
-│   └── restoration_net.py    # U-Net image restoration
-├── utils/
-│   ├── __init__.py
-│   ├── metrics.py            # Evaluation metrics (PSNR, SSIM, LPIPS)
-│   ├── model_builder.py      # Factory for creating models/dataloaders
-│   └── visualize.py          # Visualization utilities
-├── tests/                    # Unit tests
-├── train.py                  # Main training script
-├── test.py                   # Full-resolution testing script
-├── trainer.py                # DualBranchTrainer (3-Stage Training Logic)
-└── README.md
+```text
+Defocus_plus/
+├── config/                   # YAML 配置文件 (包含消融实验配置)
+│   ├── default.yaml          # 默认完整配置
+│   ├── ablation_1_no_physics.yaml # 消融实验：无物理层
+│   └── ...
+├── data/                     # 数据集及预处理脚本
+├── models/                   # 核心网络模型
+│   ├── aberration_net.py     # 像差预测网络 (MLP + 傅里叶特征编码)
+│   ├── physical_layer.py     # 空间变化物理层 (基于 Overlap-Add)
+│   ├── restoration_net.py    # 图像复原网络 (U-Net)
+│   └── zernike.py            # Zernike 多项式与 PSF 生成器
+├── utils/                    # 工具函数 (数据加载、指标计算、可视化等)
+├── generate_extreme_ood_dataset.py # 极端像差数据集生成脚本
+├── train.py                  # 训练主脚本
+├── test.py                   # 测试主脚本
+├── trainer.py                # 三阶段解耦训练器
+└── README.md                 # 项目说明文档
 ```
 
-## Key Components
+## 核心组件解析
 
-### 1. Zernike PSF Generator (`models/zernike.py`)
+### 1. Zernike PSF 生成器 (`models/zernike.py`)
+将 Zernike 系数转换为 PSF 卷积核。支持高阶像差（默认 36 阶 Noll 模式），通过可微的傅里叶光学过程（波前相位 -> 瞳孔函数 -> PSF）实现。
 
-Converts Zernike coefficients to PSF kernels:
+### 2. 像差网络 (`models/aberration_net.py`)
+基于 MLP 的网络，输入归一化空间坐标，输出该位置的 Zernike 系数。引入了**傅里叶特征编码 (Fourier Feature Encoding)**，有效提升了网络对高频空间变化的拟合能力。
 
-```python
-from models import DifferentiableZernikeGenerator
+### 3. 物理层 (`models/physical_layer.py`)
+实现了高效的**空间变化卷积**。采用 Overlap-Add (OLA) 策略，将图像分割为重叠的补丁 (Patch)，为每个补丁生成局部 PSF，并在频域 (FFT) 进行快速卷积，最后通过 Hann 窗口加权拼接，确保平滑过渡。
 
-generator = DifferentiableZernikeGenerator(n_modes=15, pupil_size=64, kernel_size=33)
-coeffs = torch.randn(10, 15)  # [Batch, Ncoeffs]
-psf_kernels = generator(coeffs)  # [Batch, 1, 33, 33]
-```
+### 4. 复原网络 (`models/restoration_net.py`)
+基于 U-Net 架构，支持坐标注入 (CoordConv) 和物理先验注入 (将预测的 Zernike 系数图作为额外特征输入)，引导网络更好地处理空间变化的模糊。
 
-**Physics pipeline:**
+## 消融实验 (Ablation Studies)
 
-1. Wavefront: Φ = 2π · Σ aₘ · Zₘ(ρ,θ)
-2. Pupil: P = A · exp(iΦ)
-3. PSF: K = |FFT2(P)|² (normalized)
+`config/` 目录下提供了多个消融实验配置文件：
+- `ablation_1_no_physics.yaml`: 移除物理层，退化为纯数据驱动的端到端复原网络。
+- `ablation_2_no_fourier.yaml`: 移除 AberrationNet 中的傅里叶特征编码。
+- `ablation_3_end_to_end.yaml`: 取消三阶段解耦训练，直接进行端到端联合训练。
 
-### 2. Aberration Network (`models/aberration_net.py`)
-
-Predicts spatially-varying Zernike coefficients:
-
-```python
-from models import AberrationNet
-
-net = AberrationNet(num_coeffs=15, hidden_dim=64, a_max=2.0)
-coords = torch.tensor([[-0.5, 0.3], [0.2, -0.8]])  # Normalized coordinates
-coeffs = net(coords)  # [2, 15]
-```
-
-### 3. Restoration Network (`models/restoration_net.py`)
-
-U-Net with residual learning:
-
-```python
-from models import RestorationNet
-
-net = RestorationNet(n_channels=1, n_classes=1, base_filters=32)
-blurred = torch.randn(2, 1, 256, 256)
-restored = net(blurred)  # [2, 1, 256, 256]
-```
-
-### 4. NewBP Spatial Convolution (`models/newbp_convolution.py`)
-
-A custom Autograd function designed to handle the gradient flow of spatially-varying blur correctly.
-
-```python
-from models.newbp_convolution import NewBPSpatialConvolution
-
-# Enable comparison mode (diagonal gradients only) for ablation studies
-conv = NewBPSpatialConvolution(use_diagonal_only=False)
-```
-
-**Features:**
-- **Exact Gradient Decomposition**: Separates gradients into **Direct** (Diagonal) and **Indirect** (Crosstalk) components via a non-diagonal Jacobian.
-- **GPU Optimization**: Uses spatial `F.conv2d` with CuDNN optimizations (Winograd/Im2Col) for small kernels ($K \le 33$), significantly faster than FFT-based approaches for this kernel size regime.
-- **Ablation Support**: Supports `use_diagonal_only=True` to simulate traditional gradients that ignore spatial crosstalk.
-
-### 5. Physical Layer (`models/physical_layer.py`)
-
-Spatially-varying convolution via Overlap-Add:
-
-```python
-from models import SpatiallyVaryingPhysicalLayer
-
-layer = SpatiallyVaryingPhysicalLayer(
-    aberration_net=aberration_net,
-    zernike_generator=zernike_gen,
-    patch_size=128,
-    stride=64
-)
-
-sharp_image = torch.randn(2, 1, 256, 256)
-blurred_image = layer(sharp_image)  # [2, 1, 256, 256]
-```
-
-## Training
-
-### Basic Usage
-
-```python
-from trainer import DualBranchTrainer
-
-trainer = DualBranchTrainer(
-    restoration_net=restoration_net,
-    physical_layer=physical_layer,
-    lr_restoration=1e-4,
-    lr_optics=1e-5
-)
-
-# Training step
-stats = trainer.train_step(Y_blurred, X_gt=None)  # Unsupervised
-print(f"Loss: {stats['loss']}, Grad W: {stats['grad_W']}, Grad Theta: {stats['grad_Theta']}")
-```
-
-### Loss Function
-
-- **Data Consistency**: L_data = MSE(Ŷ, Y) where Ŷ = PhysicalLayer(RestorationNet(Y))
-- **Supervised** (optional): L_sup = MSE(X̂, X_gt)
-- **Regularization**: L_coeff = mean(a²) for coefficient sparsity
-- **Total**: L = L_data + λ_sup·L_sup + λ_coeff·L_coeff
-
-## Visualization
-
-```python
-from utils import plot_psf_grid, plot_coefficient_maps
-
-# Visualize PSFs across the field
-plot_psf_grid(physical_layer, H=256, W=256, device='cuda', filename='psf_grid.png')
-
-# Visualize coefficient spatial distribution
-plot_coefficient_maps(physical_layer, H=256, W=256, device='cuda', filename='coeff_maps.png')
-```
-
-## Technical Details
-
-### Zernike Polynomials
-
-- Uses Noll indexing (j=1 to 15 by default)
-- Modes: Piston, Tilt, Defocus, Astigmatism, Coma, Spherical
-- Normalization: RMS = 1 (Noll convention)
-
-### Overlap-Add (OLA) Convolution
-
-- Patch size: P = 128 pixels
-- Stride: S = 64 pixels (50% overlap)
-- Window: Hann 2D for smooth blending
-- Convolution: **NewBP Spatial Convolution** (see above) allows for precise gradient control during backpropagation.
-
-### Optimization
-
-- Separate learning rates: W (1e-4), Θ (1e-5)
-- Gradient clipping: W (5.0), Θ (1.0)
-- Optimizer: AdamW for both branches
-
-## Verification Results
-
-✅ **PSF Normalization Test**: All kernels sum to 1.0000 ± 1e-5  
-✅ **Gradient Flow Test**: Gradients successfully propagate to both W and Θ  
-✅ **NewBP Jacobian Test**: Verified non-diagonal structure of the convolution Jacobian.
-✅ **Demo Training**: Loss converges, gradients remain active
-
-## References
-
-1. **Zernike Polynomials**: Noll, R. J. (1976). "Zernike polynomials and atmospheric turbulence"
-2. **Fourier Optics**: Goodman, J. W. (2005). "Introduction to Fourier Optics"
-3. **U-Net**: Ronneberger, O., et al. (2015). "U-Net: Convolutional Networks for Biomedical Image Segmentation"
-4. **Physics-Driven Learning**: Related to "Deep Optics" and "End-to-End Optimization" paradigms
-
-## License
-
-MIT License
-
-## Citation
-
-```bibtex
-@software{physics_blind_deconv,
-  title={Physics-Driven Blind Deconvolution Network},
-  author={Your Name},
-  year={2026}
-}
+可以通过指定 `--config` 参数运行相应的消融实验：
+```bash
+python train.py --config config/ablation_1_no_physics.yaml
 ```
