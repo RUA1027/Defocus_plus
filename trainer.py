@@ -104,7 +104,6 @@ class DualBranchTrainer:
     
     特性:
     - 动态损失权重调整
-    - 熔断机制 (Circuit Breaker)
     - TensorBoard 日志
     - Stage 3 学习率自动减半
     """
@@ -133,8 +132,7 @@ class DualBranchTrainer:
                  amp_dtype="float16",
                  device='cuda',
                  accumulation_steps=4,
-                 tensorboard_dir=None,
-                 circuit_breaker_config=None):
+                 tensorboard_dir=None):
 
         self.device = device
         self.restoration_net = restoration_net.to(device)
@@ -210,16 +208,6 @@ class DualBranchTrainer:
         self._current_stage = 'joint' if self.use_physical_layer else 'restoration_only'
         self._previous_stage = None  # 用于检测阶段切换
         self._stage3_lr_halved = False  # 标记 Stage 3 学习率是否已减半
-        self._forced_stage = None  # 强制阶段 (用于熔断阻断切换)
-
-        # 熔断机制配置
-        self.circuit_breaker_config = circuit_breaker_config or {
-            'enabled': True,
-            'stage1_min_loss': 0.005,
-            'stage2_min_psnr': 30.0
-        }
-        self.circuit_breaker_triggered = False
-        self.circuit_breaker_message = ""
 
         # TensorBoard
         self.writer = None  # type: Optional[Any]
@@ -288,67 +276,6 @@ class DualBranchTrainer:
         
         self._stage3_lr_halved = True
         print(f"[Stage 3] Learning rate halved: lr_restoration={new_lr_W:.2e}, lr_optics={new_lr_Theta:.2e}")
-
-    def check_circuit_breaker(self, val_metrics: Dict[str, float], current_stage: str, next_stage: str) -> bool:
-        """
-        熔断机制检查：验证当前阶段是否达到切换条件
-        
-        Args:
-            val_metrics: 验证集指标字典
-            current_stage: 当前训练阶段
-            next_stage: 即将进入的阶段
-        
-        Returns:
-            bool: True 表示可以切换，False 表示熔断（不允许切换）
-        """
-        if not self.use_physical_layer:
-            return True
-        if not self.circuit_breaker_config.get('enabled', False):
-            return True  # 熔断机制未启用，允许切换
-        
-        # Stage 1 -> Stage 2: 检查重模糊误差
-        if current_stage == 'physics_only' and next_stage == 'restoration_fixed_physics':
-            reblur_mse = val_metrics.get('Reblur_MSE', val_metrics.get('reblur_mse', float('inf')))
-            threshold = self.circuit_breaker_config.get('stage1_min_loss', 0.5)
-            
-            if reblur_mse > threshold:
-                self.circuit_breaker_triggered = True
-                self.circuit_breaker_message = (
-                    f"[Circuit Breaker] Stage 1 -> 2 BLOCKED: "
-                    f"Reblur MSE ({reblur_mse:.4f}) > threshold ({threshold:.4f}). "
-                    f"Physics layer not ready. Continuing Stage 1..."
-                )
-                return False
-        
-        # Stage 2 -> Stage 3: 检查 PSNR 和 SSIM
-        if current_stage == 'restoration_fixed_physics' and next_stage == 'joint':
-            psnr = val_metrics.get('PSNR', val_metrics.get('psnr', 0.0))
-            ssim = val_metrics.get('SSIM', val_metrics.get('ssim', 0.0))
-            
-            psnr_threshold = self.circuit_breaker_config.get('stage2_min_psnr', 20.0)
-            ssim_threshold = self.circuit_breaker_config.get('stage2_min_ssim', 0.0)
-            
-            if psnr < psnr_threshold:
-                self.circuit_breaker_triggered = True
-                self.circuit_breaker_message = (
-                    f"[Circuit Breaker] Stage 2 -> 3 BLOCKED: "
-                    f"PSNR ({psnr:.2f}) < threshold ({psnr_threshold:.2f}). "
-                    f"Restoration network not ready. Continuing Stage 2..."
-                )
-                return False
-
-            if ssim < ssim_threshold:
-                self.circuit_breaker_triggered = True
-                self.circuit_breaker_message = (
-                    f"[Circuit Breaker] Stage 2 -> 3 BLOCKED: "
-                    f"SSIM ({ssim:.4f}) < threshold ({ssim_threshold:.4f}). "
-                    f"Restoration network structural quality low. Continuing Stage 2..."
-                )
-                return False
-        
-        self.circuit_breaker_triggered = False
-        self.circuit_breaker_message = ""
-        return True
 
     def update_best_metrics(self, val_metrics: Dict[str, float], stage: str) -> Dict[str, bool]:
         """
@@ -551,19 +478,6 @@ class DualBranchTrainer:
         self._set_trainable(stage)
 
     def get_stage(self, epoch: int) -> str:
-        return self._resolve_stage(epoch)
-
-    def set_forced_stage(self, stage: Optional[str]):
-        if stage is None:
-            self._forced_stage = None
-            return
-        if stage not in self.VALID_STAGES:
-            raise ValueError(f"Invalid stage '{stage}'. Must be one of {self.VALID_STAGES}")
-        self._forced_stage = stage
-
-    def _resolve_stage(self, epoch: int) -> str:
-        if self._forced_stage is not None:
-            return self._forced_stage
         return self._get_stage(epoch)
 
     def get_stage_weights(self, epoch: int):
@@ -592,7 +506,7 @@ class DualBranchTrainer:
         """
         执行一个训练步骤，内部根据 epoch 自动切换阶段并分配动态 Loss 权重。
         """
-        current_stage = self._resolve_stage(epoch)
+        current_stage = self._get_stage(epoch)
         
         # 检测阶段切换
         if self._previous_stage is not None and self._previous_stage != current_stage:

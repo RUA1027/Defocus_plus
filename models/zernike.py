@@ -152,7 +152,7 @@ class ZernikeBasis(nn.Module):
       偶数 j → cos(|m|θ)  (正 m 分量)
       奇数 j → sin(|m|θ)  (负 m 分量)
     """
-    def __init__(self, n_modes=15, grid_size=64, device='cpu'):
+    def __init__(self, n_modes=36, grid_size=64, device='cpu'):
         super().__init__()
         self.n_modes = n_modes
         self.grid_size = grid_size

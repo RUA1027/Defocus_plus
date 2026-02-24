@@ -215,10 +215,3 @@ checkpoint:
   stage1_metric: "reblur_mse"    # Stage 1: 重模糊一致性误差 (越低越好)
   stage2_metric: "psnr"          # Stage 2: PSNR (越高越好)
   stage3_metric: "combined"      # Stage 3: 综合指标 (PSNR + 物理约束)
-  
-  # 熔断机制阈值
-  circuit_breaker:
-    enabled: false
-    stage1_min_loss: 0.005         # Stage 1 验证 Reblur MSE 需低于此值才能进入 Stage 2
-    stage2_min_psnr: 30.0        # Stage 2 验证 PSNR 需高于此值才能进入 Stage 3
-    stage2_min_ssim: 0.95         # Stage 2 验证 SSIM 需高于此值才能进入 Stage 3

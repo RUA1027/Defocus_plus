@@ -121,17 +121,6 @@ def build_trainer_from_config(config: Config, restoration_net, physical_layer, d
                     config.experiment.name
                 )
     
-    # 熔断机制配置
-    circuit_breaker_config = None
-    if hasattr(config, 'checkpoint') and hasattr(config.checkpoint, 'circuit_breaker'):
-        cb_config = config.checkpoint.circuit_breaker
-        circuit_breaker_config = {
-            'enabled': getattr(cb_config, 'enabled', False),
-            'stage1_min_loss': getattr(cb_config, 'stage1_min_loss', 0.005),
-            'stage2_min_psnr': getattr(cb_config, 'stage2_min_psnr', 30.0),
-            'stage2_min_ssim': getattr(cb_config, 'stage2_min_ssim', 0.95)
-        }
-        
     trainer = DualBranchTrainer(
         restoration_net=restoration_net,
         physical_layer=physical_layer,
@@ -153,8 +142,7 @@ def build_trainer_from_config(config: Config, restoration_net, physical_layer, d
         amp_dtype=getattr(config.training, 'amp_dtype', 'float16'),
         accumulation_steps=accumulation_steps,
         device=device,
-        tensorboard_dir=tensorboard_dir,
-        circuit_breaker_config=circuit_breaker_config
+        tensorboard_dir=tensorboard_dir
     )
     
     return trainer

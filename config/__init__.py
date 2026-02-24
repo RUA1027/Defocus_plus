@@ -37,7 +37,7 @@ from pathlib import Path
 @dataclass
 class PhysicsConfig:
     """物理光学参数配置"""
-    n_modes: int = 15
+    n_modes: int = 36
     pupil_size: int = 64
     kernel_size: int = 33
     oversample_factor: int = 2
@@ -83,7 +83,7 @@ class MLPConfig:
 @dataclass
 class AberrationNetConfig:
     """像差预测网络配置 (MLP)"""
-    n_coeffs: int = 15
+    n_coeffs: int = 36
     a_max: float = 2.0
     mlp: MLPConfig = field(default_factory=MLPConfig)
 
@@ -221,22 +221,12 @@ class TensorBoardConfig:
 
 
 @dataclass
-class CircuitBreakerConfig:
-    """熔断机制配置"""
-    enabled: bool = True
-    stage1_min_loss: float = 0.5     # Stage 1 验证 Loss 需低于此值才能进入 Stage 2
-    stage2_min_psnr: float = 20.0    # Stage 2 验证 PSNR 需高于此值才能进入 Stage 3
-    stage2_min_ssim: float = 0.0     # Stage 2 验证 SSIM 需高于此值才能进入 Stage 3 (0.0 表示不启用)
-
-
-@dataclass
 class CheckpointConfig:
     """检查点保存策略配置"""
     save_best_per_stage: bool = True
     stage1_metric: str = "reblur_mse"  # Stage 1 使用重模糊误差
     stage2_metric: str = "psnr"        # Stage 2 使用 PSNR
     stage3_metric: str = "combined"    # Stage 3 使用综合指标
-    circuit_breaker: CircuitBreakerConfig = field(default_factory=CircuitBreakerConfig)
     save_interval: int = 10
     log_interval: int = 1
     output_dir: str = "results"
@@ -407,7 +397,7 @@ def _build_config_from_dict(data: Dict[str, Any]) -> Config:
     ab_data = data.get('aberration_net', {})
     mlp = _dict_to_dataclass(MLPConfig, ab_data.get('mlp', {}))
     aberration_net = AberrationNetConfig(
-        n_coeffs=ab_data.get('n_coeffs', 15),
+        n_coeffs=ab_data.get('n_coeffs', 36),
         a_max=ab_data.get('a_max', 2.0),
         mlp=mlp
     )
@@ -473,13 +463,11 @@ def _build_config_from_dict(data: Dict[str, Any]) -> Config:
     
     # CONFIG_FIX: 添加缺失的 checkpoint 配置解析
     ckpt_data = data.get('checkpoint', {})
-    circuit_breaker = _dict_to_dataclass(CircuitBreakerConfig, ckpt_data.get('circuit_breaker', {}))
     checkpoint = CheckpointConfig(
         save_best_per_stage=ckpt_data.get('save_best_per_stage', True),
         stage1_metric=ckpt_data.get('stage1_metric', 'reblur_mse'),
         stage2_metric=ckpt_data.get('stage2_metric', 'psnr'),
         stage3_metric=ckpt_data.get('stage3_metric', 'combined'),
-        circuit_breaker=circuit_breaker,
         save_interval=ckpt_data.get('save_interval', 10),
         log_interval=ckpt_data.get('log_interval', 1),
         output_dir=ckpt_data.get('output_dir', 'results')

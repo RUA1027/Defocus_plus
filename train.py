@@ -7,7 +7,6 @@ DPDD 物理驱动复原网络 - 训练脚本
 - 三阶段训练: 由 training.stage_schedule 定义
 - 虚拟长度机制: 每张图在一个 Epoch 内被随机裁剪多次
 - TensorBoard 可视化
-- 熔断机制: 阶段切换前验证模型质量
 - 定期存档: 每 20 个 Epoch 强制保存
 - 阶段最佳模型: 各阶段独立保存最佳模型
 
@@ -297,32 +296,6 @@ def main():
         # 阶段切换时打印信息
         if stage != prev_stage:
             print_stage_info(stage, current_epoch, total_epochs)
-            
-            # 熔断机制检查（在阶段切换时）
-            if prev_stage is not None and use_physical_layer:
-                # 先评估当前验证指标
-                if prev_stage == 'physics_only':
-                    if trainer.physical_layer is None:
-                        raise RuntimeError("physical_layer is required for physics_only evaluation")
-                    val_metrics = PerformanceEvaluator.evaluate_stage1(
-                        trainer.physical_layer, val_loader, device,
-                        config.training.smoothness_grid_size
-                    )
-                else:
-                    val_metrics = evaluator.evaluate(
-                        trainer.restoration_net, trainer.physical_layer,
-                        val_loader, device, config.training.smoothness_grid_size
-                    )
-                
-                # 检查熔断
-                can_switch = trainer.check_circuit_breaker(val_metrics, prev_stage, stage)
-                if not can_switch:
-                    print(trainer.circuit_breaker_message)
-                    # 严格熔断：阻止阶段切换，继续上一阶段训练
-                    trainer.set_forced_stage(prev_stage)
-                    stage = prev_stage
-                else:
-                    trainer.set_forced_stage(None)
             
             prev_stage = stage
         else:
