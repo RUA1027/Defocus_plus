@@ -9,7 +9,7 @@
 physics:
   # Zernike 多项式相关
   # 扩充 Zernike 模式，覆盖到 8 阶像差
-  # 原值: 15 (覆盖到 4 阶), 新值: 36 (包含二级慧差、三级球差等)
+  # 统一为 36 (覆盖到 8 阶，包含二级慧差、三级球差等)
   n_modes: 36                    # Zernike 模式数量 (Noll 1-36)
   pupil_size: 129                 # 光石计算网格大小 (128 for High Res)
   kernel_size: 65                # PSF 卷积核大小 (高阶像差 PSF 更弥散，稍微增大)

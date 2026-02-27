@@ -1,6 +1,6 @@
 # 将 Zernike 像差系数 转换为 PSF (点扩散函数) 卷积核
 '''
-Zernike 系数 [a₁, a₂, ..., a₁₅]
+Zernike 系数 [a₁, a₂, ..., a₃₆]
         ↓ (物理光学计算)
 波前相位 φ(x, y)
         ↓ (FFT)
@@ -15,7 +15,7 @@ import math
 from contextlib import nullcontext
 '''
 Zernike 系数 (从 AberrationNet)
-    [B*N, 15]
+    [B*N, 36]
         │
         ▼
         │
@@ -419,8 +419,8 @@ class DifferentiableZernikeGenerator(nn.Module):
 AberrationNet 输出
     │
     ▼
-Zernike 系数 [B*N, 15]
-(如 [128, 15])
+Zernike 系数 [B*N, 36]
+(如 [128, 36])
     │
     ├─ a₁ (Piston)
     ├─ a₂ (Tilt-X)
@@ -428,7 +428,7 @@ Zernike 系数 [B*N, 15]
     ├─ a₄ (Defocus) ← 最重要
     ├─ a₅ (Astigmatism-45°)
     ├─ ...
-    └─ a₁₅ (Quadrafoil)
+    └─ a₃₆ (Higher-order mode)
     │
     ▼
 DifferentiableZernikeGenerator.forward()

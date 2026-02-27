@@ -69,7 +69,7 @@ Hann 窗口加权拼接
 
 [64, 2]  coords (N_patches, 2)
     ↓ AberrationNet
-[64, 15]  coeffs (N_patches, n_coeffs)
+[64, 36]  coeffs (N_patches, n_coeffs)
     ↓ ZernikeGenerator
 [64, 3, 31, 31]  kernels (N_patches, C_k, K, K)
 
@@ -471,17 +471,17 @@ reshape → [B*N_patches, C, P, P]
         不同补丁使用不同的卷积核:
         补丁 1 (中心: 图像左上)
   ├─ 坐标 (-0.778, -0.778)
-  ├─ AberrationNet 预测系数 [a₁, a₂, ..., a₁₅]
+    ├─ AberrationNet 预测系数 [a₁, a₂, ..., a₃₆]
   └─ ZernikeGenerator → PSF 核 K₁ [3, 31, 31]
 
 补丁 2 (中心: 图像中心)
   ├─ 坐标 (0, 0)
-  ├─ AberrationNet 预测系数 [a'₁, a'₂, ..., a'₁₅]
+    ├─ AberrationNet 预测系数 [a'₁, a'₂, ..., a'₃₆]
   └─ ZernikeGenerator → PSF 核 K₂ [3, 31, 31]
 
 补丁 64 (中心: 图像右下)
   ├─ 坐标 (0.778, 0.778)
-  ├─ AberrationNet 预测系数 [a''₁, a''₂, ..., a''₁₅]
+    ├─ AberrationNet 预测系数 [a''₁, a''₂, ..., a''₃₆]
   └─ ZernikeGenerator → PSF 核 K₆₄ [3, 31, 31]
         '''
         # 光学系统的像差通常随视场角变化（如边缘失焦）

@@ -4,7 +4,7 @@
 '''
 目标：给定图像平面上的空间位置 (u,v)
    ↓
-   输出该位置处的光学像差参数（15个Zernike系数）
+    输出该位置处的光学像差参数（36个Zernike系数）
    ↓
    用于生成该位置的点扩散函数(PSF)
 '''
@@ -56,10 +56,10 @@ class AberrationNet(nn.Module):
 │  LeakyReLU(0.2)                    │
 │  Linear(128, 64)                   │
 │  LeakyReLU(0.2)                    │
-│  Linear(64, 15)  ← 输出层          │
+│  Linear(64, 36)  ← 输出层          │
 └─────────────────────────────────────┘
     ↓
-  raw_coeffs [B, 15]
+    raw_coeffs [B, 36]
     ↓
 ┌─────────────────────────────────────┐
 │   Tanh 约束                         │
@@ -67,7 +67,7 @@ class AberrationNet(nn.Module):
 │   范围：[-a_max, +a_max]           │
 └─────────────────────────────────────┘
     ↓
-输出系数 [B, 15]
+输出系数 [B, 36]
     '''
     def __init__(self, num_coeffs, hidden_dim, a_max, use_fourier=True):
         super().__init__()
