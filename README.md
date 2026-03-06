@@ -1,51 +1,63 @@
-# 物理驱动盲去卷积网络 (Physics-Driven Blind Deconvolution Network)
+# Physics-Driven Blind Deconvolution Network
 
-本项目是一个基于 PyTorch 实现的物理驱动盲去卷积网络，专门用于复原由空间变化的光学像差导致的模糊图像。该模型利用 Zernike 多项式参数化波前像差，通过可微傅里叶光学将其转换为点扩散函数 (PSF)，并结合深度学习网络实现高质量的图像复原。
+This repository provides the official PyTorch implementation of the **Physics-Driven Blind Deconvolution Network**. The framework is specifically designed to restore images degraded by spatially varying optical aberrations and severe defocus blur. By parameterizing wavefront aberrations using Zernike polynomials and leveraging differentiable Fourier optics, the model accurately translates these mathematical representations into spatially varying Point Spread Functions (PSFs). This approach seamlessly couples deep learning with physical optics fundamentals, achieving highly generalized and interpretable image restoration.
 
-## 核心特性
+## Key Features
 
-- **双分支架构**: 图像复原网络 (RestorationNet, U-Net) + 光学辨识网络 (AberrationNet, MLP)。
-- **可微物理层**: Zernike 系数 → 波前相位 → PSF → 空间变化卷积 (基于 Overlap-Add 和 FFT 高效实现)。
-- **三阶段解耦训练**: 物理层预训练 → 固定物理层训练复原网络 → 联合微调，确保物理模型的准确性和训练的稳定性。
-- **自监督物理约束**: 通过重模糊一致性损失 (Reblurring Consistency Loss) 实现无监督的 PSF 估计。
-- **极端 OOD 数据集生成**: 提供脚本生成极端像差数据集，用于测试模型的泛化能力。
+- **Dual-Branch Architecture**: Consists of a Restoration Network (`RestorationNet`, based on an augmented U-Net) and an Optical Identification Network (`AberrationNet`, based on an MLP).
+- **Differentiable Physics Layer**: Systematically maps Zernike coefficients → Wavefront Phase → Pupil Function → PSFs → Spatially Varying Convolution. This is implemented with high computational efficiency via an Overlap-Add (OLA) strategy and Fast Fourier Transform (FFT).
+- **Three-Stage Decoupled Training**: 
+  1. **Physics Prior Pre-training**: Warms up the aberration estimator.
+  2. **Restoration Learning**: Trains the restoration U-Net with fixed optical parameters.
+  3. **Joint Fine-tuning**: End-to-end optimization. 
+  This curriculum ensures both optical metric accuracy and stable convergence.
+- **Self-Supervised Physical Constraint**: Employs a Reblurring Consistency Loss (`Loss = MSE(Ŷ, Y)`) to facilitate unsupervised PSF estimation without requiring ground-truth blur kernels.
+- **Extreme OOD Evaluation**: Includes customized scripts to generate Out-Of-Distribution (OOD) datasets featuring extreme, synthetically induced aberrations (e.g., severe field curvature or coma) for robust generalization testing.
 
-## 系统架构
+
+## System Architecture
 
 ```text
-输入模糊图像 (Y) 
+Blurred Input (Y) 
     │
-    ├─▶ RestorationNet (U-Net) ──▶ 复原图像 (X̂)
+    ├─▶ RestorationNet (U-Net) ──▶ Restored Image (X̂) ──▶ L1 Loss with Ground Truth (X_gt)
     │                                  │
     └─▶ AberrationNet (MLP)            │
              │                         │
-        Zernike 系数                   │
+        Zernike Coefficients           │
              │                         │
-        PSF 生成 (FFT)                 │
+        PSF Generation (FFT)           │
              │                         │
-        空间变化模糊 ◀─────────────────┘
+        Spatially Varying Blur ◀───────┘
              │
-        重模糊图像 (Ŷ)
-             │
-        Loss = MSE(Ŷ, Y) + L1(X̂, X_gt)
+        Reblurred Image (Ŷ) ──▶ MSE Loss with Blurred Input (Y)
 ```
 
-## 安装依赖
 
+## Installation
+
+**Requirements:**
+- Python 3.8+
+- PyTorch 1.10+
+- CUDA-enabled GPU (Highly recommended for FFT operations)
+
+Clone the repository and install the required dependencies:
 ```bash
+git clone https://github.com/RUA1027/Defocus_plus.git
+cd Defocus_plus
 pip install -r requirements.txt
 ```
 
-## 快速开始
+## Quick Start
 
-### 1. 数据准备 (DPDD 数据集)
+### 1. Data Preparation (DPDD Dataset)
 
-将 DPDD 数据集放置在 `data/dd_dp_dataset_png/` 目录下。目录结构如下：
+Download the Dual-Pixel Defocus Deblurring (DPDD) dataset and place it in the `data/dd_dp_dataset_png/` directory. The structure should be organized as follows:
 ```text
 data/dd_dp_dataset_png/
     train_c/
-        source/ (模糊图像)
-        target/ (清晰图像)
+        source/    # Blurred input images
+        target/    # Ground truth sharp images
     val_c/
         source/
         target/
@@ -53,93 +65,94 @@ data/dd_dp_dataset_png/
         source/
         target/
 ```
-*注：本项目直接从 source/target 文件夹读取数据，无需额外的缩放预处理。*
+*Note: The dataloader fetches images directly from the `source/` and `target/` directories, handling formatting internally without requiring manual prior scaling.*
 
-### 2. 模型训练
+### 2. Training Pipeline
 
-训练过程采用**三阶段解耦策略**，由 `trainer.py` 中的 `DualBranchTrainer` 控制。
+The training paradigm is driven by a **Three-Stage Decoupled Strategy**, orchestrated by the `DualBranchTrainer` inside `trainer.py`.
 
 ```bash
-# 使用默认配置进行标准训练
+# Standard training using the default configuration
 python train.py --config config/default.yaml
 
-# 从检查点恢复训练
+# Resume training from a specific checkpoint
 python train.py --resume results/latest.pt
 
-# 指定训练特定阶段 (1, 2, 3 或 all)
+# Execute a specific training stage (options: '1', '2', '3', or 'all')
 python train.py --stage all
 ```
 
-**训练阶段说明:**
-1. **Stage 1 (Physics Only)**: 仅训练 `AberrationNet`，利用重模糊一致性损失拟合光学像差。验证指标：Re-blur MSE。
-2. **Stage 2 (Restoration)**: 冻结物理层，训练 `RestorationNet`。验证指标：PSNR & SSIM。
-3. **Stage 3 (Joint Finetuning)**: 解冻所有模块，学习率减半进行联合微调。验证指标：综合指标。
+**Detailed Stage Breakdown:**
+1. **Stage 1 (Physics Only)**: Trains the `AberrationNet` exclusively. It fits the optical distortion distributions by heavily relying on the reblurring consistency constraint. *Validation Metric: Re-blur MSE.*
+2. **Stage 2 (Restoration)**: Freezes the physics layer to stabilize the gradients, subsequently training the `RestorationNet` against the sharp ground-truth images. *Validation Metrics: PSNR & SSIM.*
+3. **Stage 3 (Joint Fine-tuning)**: Unfreezes all components and conducts an end-to-end joint training phase with a decayed learning rate (typically halved). *Validation Metric: Comprehensive combined score.*
 
-### 3. 模型测试
+### 3. Evaluation and Testing
 
-在全分辨率 (1680 x 1120) 测试集上评估模型性能。
+To evaluate the model on the full-resolution (e.g., 1680 x 1120) DPDD test set:
 
 ```bash
-# 使用联合微调后的最佳模型进行测试，并保存复原图像
+# Test using the jointly fine-tuned model and export the restored images
 python test.py --checkpoint results/best_stage3_joint.pt --config config/default.yaml --save-restored
 
-# 仅评估指标，不保存图像
+# Evaluate numerical metrics exclusively (faster, skips saving images)
 python test.py --checkpoint results/best_stage2_psnr.pt
 ```
-测试结果将保存在 `results/` 目录下，包含详细的 `test_results.csv` (PSNR, SSIM, LPIPS, Reblur_MSE) 和可视化对比图。
+The test outputs are stored in the `results/` directory. This includes a comprehensively formatted `test_results.csv` tracking PSNR, SSIM, LPIPS, and Reblur MSE, alongside side-by-side visual comparisons in the `comparisons/` folder.
 
-### 4. 极端 OOD 数据集生成
+### 4. Extreme OOD Dataset Generation
 
-本项目提供了一个脚本，用于生成具有极端空间变化像差（如严重边缘崩坏、强彗差和像散）的测试集，以评估模型的鲁棒性。
+To strictly evaluate the theoretical robustness of the network under unprecedented optical conditions, we provide an automated script to synthesize Out-Of-Distribution datasets presenting severe spatially varying defects (like extreme field curvature).
 
 ```bash
+# Generates standard/extreme datasets into the 'data/extreme aberration' directory
 python generate_extreme_ood_dataset.py
 ```
 
-## 目录结构
+## Modular Codebase Structure
 
 ```text
 Defocus_plus/
-├── config/                   # YAML 配置文件 (包含消融实验配置)
-│   ├── default.yaml          # 默认完整配置
-│   ├── ablation_1_no_physics.yaml # 消融实验：无物理层
+├── config/                   # Centralized YAML configuration files
+│   ├── default.yaml          # Standard hyperparameter definitions
+│   ├── ablation_1_no_physics.yaml # Ablation: Purges the physics layer
 │   └── ...
-├── data/                     # 数据集及预处理脚本
-├── models/                   # 核心网络模型
-│   ├── aberration_net.py     # 像差预测网络 (MLP + 傅里叶特征编码)
-│   ├── physical_layer.py     # 空间变化物理层 (基于 Overlap-Add)
-│   ├── restoration_net.py    # 图像复原网络 (U-Net)
-│   └── zernike.py            # Zernike 多项式与 PSF 生成器
-├── utils/                    # 工具函数 (数据加载、指标计算、可视化等)
-├── generate_extreme_ood_dataset.py # 极端像差数据集生成脚本
-├── train.py                  # 训练主脚本
-├── test.py                   # 测试主脚本
-├── trainer.py                # 三阶段解耦训练器
-└── README.md                 # 项目说明文档
+├── data/                     # Data hosting and preprocessing directives
+├── models/                   # Core architectural algorithms
+│   ├── aberration_net.py     # Aberration MLP incorporating Fourier Feature Encoding
+│   ├── physical_layer.py     # Differentiable overlapping convolution (Overlap-Add)
+│   ├── restoration_net.py    # Generative U-Net incorporating optical priors
+│   └── zernike.py            # Optical kernel engine generating Zernike polynomials 
+├── utils/                    # Shared utilities (dataset loaders, metrics, logging)
+├── generate_extreme_ood_dataset.py # Script for generating robustness stress-tests
+├── train.py                  # Primary training entry point
+├── test.py                   # Primary evaluation entry point
+├── trainer.py                # Implementations of the multi-stage training mechanisms
+└── README.md                 # Technical documentation entry
 ```
 
-## 核心组件解析
+## Core Components Deep-Dive
 
-### 1. Zernike PSF 生成器 (`models/zernike.py`)
-将 Zernike 系数转换为 PSF 卷积核。支持高阶像差（默认 36 阶 Noll 模式），通过可微的傅里叶光学过程（波前相位 -> 瞳孔函数 -> PSF）实现。
+### 1. Zernike PSF Engine (`models/zernike.py`)
+Translates abstract polynomial coefficients into dense PSF matrices. It mathematically supports high-order optical aberrations (using 36 Noll modes) via a differentiable physical pipeline: mapping discrete phases to continuous pupil functions, and deriving complex PSFs via Fourier domain integration.
 
-### 2. 像差网络 (`models/aberration_net.py`)
-基于 MLP 的网络，输入归一化空间坐标，输出该位置的 Zernike 系数。引入了**傅里叶特征编码 (Fourier Feature Encoding)**，有效提升了网络对高频空间变化的拟合能力。
+### 2. Aberration Network (`models/aberration_net.py`)
+Constructed as an MLP mapping normalized 2D image coordinates to granular sets of 36 continuous Zernike coefficients. Crucially, it integrates **Fourier Feature Encoding** (FFE) to overcome spectral bias, exponentially enhancing its capability to memorize high-frequency spatially varying aberrations mapping the full lens field.
 
-### 3. 物理层 (`models/physical_layer.py`)
-实现了高效的**空间变化卷积**。采用 Overlap-Add (OLA) 策略，将图像分割为重叠的补丁 (Patch)，为每个补丁生成局部 PSF，并在频域 (FFT) 进行快速卷积，最后通过 Hann 窗口加权拼接，确保平滑过渡。
+### 3. Differentiable Physical Layer (`models/physical_layer.py`)
+Houses a meticulously optimized **spatially varying convolution module**. Operating over large full-resolution image arrays natively is computationally prohibitive. Therefore, this component relies on the Overlap-Add (OLA) mathematical approach: dividing feature maps into localized patches, applying FFT-based targeted localized convolutions per patch based on the dynamically formulated PSF grids, and subsequently aggregating via continuous Hann windows to guarantee boundary smoothness without artifacts.
 
-### 4. 复原网络 (`models/restoration_net.py`)
-基于 U-Net 架构，支持坐标注入 (CoordConv) 和物理先验注入 (将预测的 Zernike 系数图作为额外特征输入)，引导网络更好地处理空间变化的模糊。
+### 4. Prior-Conditioned Restoration Network (`models/restoration_net.py`)
+An advanced encoding-decoding U-Net model enhanced with explicit physical coordinate conditioning (CoordConv principles). It fuses the blurry input visual states dynamically correlated alongside the continuous Zernike maps formulated by the `AberrationNet`. This robust topological fusion instructs the restorer to implicitly decode exact spatially dependent pixel transformations required for high-fidelity deblurring.
 
-## 消融实验 (Ablation Studies)
+## Ablation Studies & Custom Configurations
 
-`config/` 目录下提供了多个消融实验配置文件：
-- `ablation_1_no_physics.yaml`: 移除物理层，退化为纯数据驱动的端到端复原网络。
-- `ablation_2_no_fourier.yaml`: 移除 AberrationNet 中的傅里叶特征编码。
-- `ablation_3_end_to_end.yaml`: 取消三阶段解耦训练，直接进行端到端联合训练。
+The `config/` directory manages independent YAML declarations meant directly for conducting replicable ablation analyses:
+- `ablation_1_no_physics.yaml`: Disables the Zernike-Fourier branch entirely, forcing the architecture to emulate standard data-driven baselines.
+- `ablation_2_no_fourier.yaml`: Removes Fourier Feature parameters from the `AberrationNet` to quantify its necessity for high-frequency coordinate mapping.
+- `ablation_3_end_to_end.yaml`: Completely overrides the standard three-stage strategy to perform brute-force direct end-to-end training.
 
-可以通过指定 `--config` 参数运行相应的消融实验：
+To seamlessly execute any specific topological modification defined in configurations:
 ```bash
 python train.py --config config/ablation_1_no_physics.yaml
 ```
