@@ -222,7 +222,7 @@ def main():
             if args.save_restored:
                 save_path = os.path.join(output_dir, 'restored', f'{os.path.splitext(filename)[0]}_restored.png')
                 save_single_result(restored[0], save_path)
-    avg_metrics = {'PSNR': psnr_total / max(n, 1), 'SSIM': ssim_total / max(n, 1), 'MAE': mae_total / max(n, 1), 'LPIPS': lpips_total / lpips_count if lpips_count > 0 else float('nan'), 'Reblur_MSE': reblur_total / max(n, 1) if use_physical_layer else float('nan'), 'Params_M': model_stats['total_params'] / 1000000.0, 'FLOPs_G': model_stats['total_flops'] / 1000000000.0 if model_stats['total_flops'] is not None else float('nan'), 'Num_Images': n}
+    avg_metrics = {'PSNR': psnr_total / max(n, 1), 'SSIM': ssim_total / max(n, 1), 'MAE': mae_total / max(n, 1), 'LPIPS': lpips_total / lpips_count if lpips_count > 0 else float('nan'), 'Reblur_MSE': reblur_total / max(n, 1) if use_physical_layer else float('nan'), 'Params_M': model_stats['total_params'] / 1000000.0, 'FLOPs_G': model_stats['total_flops'] if model_stats['total_flops'] is not None else float('nan'), 'Num_Images': n}
     print('\n' + '=' * 60)
     print('Test Results Summary')
     print('=' * 60)
