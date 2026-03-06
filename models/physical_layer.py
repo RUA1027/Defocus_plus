@@ -1,92 +1,3 @@
-'''
-核心功能架构:
-
-输入图像 [B, C, H, W]
-  ↓
-分割成重叠补丁 (Overlap-Add 策略)
-  ↓
-对每个补丁中心计算坐标
-  ↓
-AberrationNet 预测该点的 Zernike 系数
-  ↓
-ZernikeGenerator 生成局部 PSF 卷积核
-  ↓
-FFT 频域卷积（高效计算）
-  ↓
-Hann 窗口加权拼接
-  ↓
-输出模糊图像 [B, C, H, W]
-'''
-
-'''
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                    SpatiallyVaryingPhysicalLayer                              │
-├──────────────────────────────────────────────────────────────────────────────┤
-│                                                                                │
-│  ┌─ 属性 (Attributes) ────────────────────────────────────────────────────┐  │
-│  │  • aberration_net: AberrationNet                                       │  │
-│  │  • zernike_generator: DifferentiableZernikeGenerator                   │  │
-│  │  • patch_size (P): 128                                                 │  │
-│  │  • stride (S): 64                                                      │  │
-│  │  • kernel_size (K): 31                                                 │  │
-│  │  • window: [128, 128] Hann 窗口 (缓冲)                                 │  │
-│  └────────────────────────────────────────────────────────────────────────┘  │
-│                                                                                │
-│  ┌─ 方法 (Methods) ───────────────────────────────────────────────────────┐  │
-│  │                                                                         │  │
-│  │  get_patch_centers(H, W, device)                                       │  │
-│  │  ├─ 输入: 图像尺寸, 设备                                                │  │
-│  │  └─ 输出: [N_patches, 2] 归一化坐标                                    │  │
-│  │                                                                         │  │
-│  │  forward(x_hat)                                                        │  │
-│  │  ├─ 步骤 1: Pad(填充)                                                  │  │
-│  │  ├─ 步骤 2: Unfold(分割补丁)                                           │  │
-│  │  ├─ 步骤 3: Generate Kernels(生成 PSF)                                │  │
-│  │  │  ├─ get_patch_centers()                                            │  │
-│  │  │  ├─ AberrationNet(坐标) → 系数                                      │  │
-│  │  │  └─ ZernikeGenerator(系数) → PSF                                    │  │
-│  │  ├─ 步骤 4: FFT Conv(频域卷积)                                         │  │
-│  │  ├─ 步骤 5: Window(窗口加权)                                           │  │
-│  │  ├─ 步骤 6: Fold(拼接)                                                 │  │
-│  │  ├─ 步骤 7: Normalize(归一化)                                          │  │
-│  │  └─ 输出: y_hat [B, C, H, W]                                           │  │
-│  │                                                                         │  │
-│  └─────────────────────────────────────────────────────────────────────────┘  │
-│                                                                                │
-└──────────────────────────────────────────────────────────────────────────────┘
-
-
-数据维度变化轨迹 (以 B=2, C=3, H=512, W=512 为例):
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-[2, 3, 512, 512]  x_hat (输入)
-    ↓ Pad
-[2, 3, 576, 576]  x_padded
-    ↓ Unfold
-[2, 3×128×128, 64]  patches_unfolded
-    ↓ Reshape
-[128, 3, 128, 128]  patches (B*N, C, P, P)
-
-[64, 2]  coords (N_patches, 2)
-    ↓ AberrationNet
-[64, 36]  coeffs (N_patches, n_coeffs)
-    ↓ ZernikeGenerator
-[64, 3, 31, 31]  kernels (N_patches, C_k, K, K)
-
-    patches ⊕ kernels (FFT 卷积)
-    ↓
-[128, 3, 128, 128]  y_patches_large
-    ↓ Crop
-[128, 3, 128, 128]  y_patches
-    ↓ Window
-[128, 3, 128, 128]  y_patches (加权)
-    ↓ Reshape
-[2, 3×128×128, 64]  y_patches_reshaped
-    ↓ Fold
-[2, 3, 576, 576]  y_accum
-    ↓ Crop to [2, 3, 512, 512]
-[2, 3, 512, 512]  y_hat (输出)
-'''
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -94,413 +5,130 @@ import torch.fft
 import math
 from .zernike import DifferentiableZernikeGenerator
 from .aberration_net import AberrationNet
-'''
-┌─────────────────────────────────────────────────────────────┐
-│ 输入: x_hat [B, C, H, W]                                      │
-│ (如 [2, 3, 512, 512] - 批大小 2, RGB 图, 512x512 像素)      │
-└──────────────────┬──────────────────────────────────────────┘
-                   │
-        ┌──────────▼──────────┐
-        │  步骤 1: 填充 (Pad)  │
-        └──────────┬──────────┘
-                   │
-        ┌──────────▼──────────────────────────────────────────┐
-        │ x_padded [B, C, H_pad, W_pad]                       │
-        │ (如 [2, 3, 576, 576] - 确保整除性)                  │
-        └──────────┬──────────────────────────────────────────┘
-                   │
-        ┌──────────▼──────────┐
-        │  步骤 2: Unfold     │
-        │ (分割成补丁)        │
-        └──────────┬──────────┘
-                   │
-        ┌──────────▼──────────────────────────────────────────┐
-        │ patches [B*N, C, P, P]                              │
-        │ (如 [2*64, 3, 128, 128] - 64 个补丁)               │
-        └──────────┬──────────────────────────────────────────┘
-                   │
-        ┌──────────▼──────────────────────────────────────────┐
-        │  步骤 3: 生成卷积核                                  │
-        │  ├─ 计算补丁中心坐标                               │
-        │  ├─ AberrationNet 预测 Zernike 系数                │
-        │  └─ ZernikeGenerator 生成 PSF 核                   │
-        └──────────┬──────────────────────────────────────────┘
-                   │
-        ┌──────────▼──────────────────────────────────────────┐
-        │ kernels [B*N, C_k, K, K]                            │
-        │ (如 [128, 3, 31, 31] - 每个补丁一个 PSF 核)        │
-        └──────────┬──────────────────────────────────────────┘
-                   │
-        ┌──────────▼──────────┐
-        │  步骤 4: FFT 卷积    │
-        │ (频域相乘)          │
-        └──────────┬──────────┘
-                   │
-        ┌──────────▼──────────────────────────────────────────┐
-        │ y_patches [B*N, C_out, P, P]                        │
-        │ (如 [128, 3, 128, 128] - 卷积后补丁)               │
-        └──────────┬──────────────────────────────────────────┘
-                   │
-        ┌──────────▼──────────────────────────────────────────┐
-        │  步骤 5: 窗口加权                                    │
-        │ y_patches *= window_2d                              │
-        │ (补丁边界平滑过渡)                                  │
-        └──────────┬──────────────────────────────────────────┘
-                   │
-        ┌──────────▼──────────────────────────────────────────┐
-        │  步骤 6: Fold (拼接)                                 │
-        │  ├─ 输出拼接                                        │
-        │  └─ 权重归一化                                      │
-        └──────────┬──────────────────────────────────────────┘
-                   │
-        ┌──────────▼──────────┐
-        │ 裁剪回原尺寸        │
-        └──────────┬──────────┘
-                   │
-        ┌──────────▼──────────────────────────────────────────┐
-        │ 输出: y_hat [B, C_out, H, W]                        │
-        │ (模糊图像)                                          │
-        └──────────────────────────────────────────────────────┘
-'''
+
 class SpatiallyVaryingPhysicalLayer(nn.Module):
-    def __init__(self, 
-                 aberration_net: nn.Module,
-                 zernike_generator: DifferentiableZernikeGenerator,
-                 patch_size,
-                 stride):
+
+    def __init__(self, aberration_net: nn.Module, zernike_generator: DifferentiableZernikeGenerator, patch_size, stride):
         super().__init__()
         self.aberration_net = aberration_net
         self.zernike_generator = zernike_generator
         self.patch_size = patch_size
         self.stride = stride
         self.kernel_size = zernike_generator.kernel_size
-        
-        # 可学习的 Gamma 参数
-        # 物理卷积必须在线性光域进行，sRGB 图像需要先反 Gamma 变换
-        # 初始化为 2.2 (标准 sRGB)，允许网络根据数据集微调
         self.gamma = nn.Parameter(torch.tensor(2.2))
-        # 数值稳定性常数，防止 pow() 求导出现 NaN
-        self.epsilon = 1e-6
-        
-        # Precompute window
-        # Hann window 2D
-        '''
-        1D Hann 窗口:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1.0 |        ╱╲
-    |       ╱  ╲
-0.5 |      ╱    ╲
-    |     ╱      ╲
-0.0 |____╱________╲____ 
-    0   32   64   96  128
-
-特点:
-• 起点 (n=0): w=0
-• 中点 (n=64): w=1 (最大值)
-• 终点 (n=127): w≈0
-• 平滑过渡，无尖角
-
-
-2D Hann 窗口 (补丁):
-━━━━━━━━━━━━━━━━━
-    ┌─────────────────┐
-    │     亮 (1.0)    │ ← 中心
-    │   ╱         ╲   │
-    │  ╱           ╲  │
-    │ ╱             ╲ │
-    │╱_______________╲│
-    │ 暗 (0)         │ ← 边缘
-    └─────────────────┘
-    
-中心最亮，边缘逐渐变暗
-        '''
-        # Hann 窗口是一个从 0 开始，逐渐升到 1，最后又降到 0 的平滑曲线。
-        # Hann 窗口的解决了:Overlap-Add 中的补丁拼接,导致重叠区域的像素被重复计算了两次，能量不守恒的问题。
-        # 通过在每个补丁上应用 Hann 窗口，补丁的边缘部分会被平滑地衰减到零，从而在拼接时避免了重复计算的问题。
-        # 这样在重叠区域，多个补丁的贡献会自然地加权平均，确保最终图像的亮度和对比度保持一致。
+        self.epsilon = 1e-06
+        '\n        1D Hann 窗口:\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n1.0 |        ╱╲\n    |       ╱  ╲\n0.5 |      ╱    ╲\n    |     ╱      ╲\n0.0 |____╱________╲____ \n    0   32   64   96  128\n特点:\n• 起点 (n=0): w=0\n• 中点 (n=64): w=1 (最大值)\n• 终点 (n=127): w≈0\n• 平滑过渡，无尖角\n2D Hann 窗口 (补丁):\n━━━━━━━━━━━━━━━━━\n    ┌─────────────────┐\n    │     亮 (1.0)    │ ← 中心\n    │   ╱         ╲   │\n    │  ╱           ╲  │\n    │ ╱             ╲ │\n    │╱_______________╲│\n    │ 暗 (0)         │ ← 边缘\n    └─────────────────┘\n中心最亮，边缘逐渐变暗\n        '
         hann = torch.hann_window(patch_size)
         window_2d = torch.outer(hann, hann)
         self.register_buffer('window', window_2d)
 
     def get_patch_centers(self, H, W, device, H_orig=None, W_orig=None, crop_info=None):
-        """
-        计算所有补丁的中心坐标，并归一化到 [-1, 1] 范围内。
-        支持全局坐标对齐（Global Coordinate Alignment）。
-        
-        Args:
-            H, W: 当前（可能已填充的）图像尺寸
-            H_orig, W_orig: 原始图像尺寸（用于全局坐标计算）
-            crop_info: [top/H_orig, left/W_orig, crop_h/H_orig, crop_w/W_orig] 
-                      表示裁剪区域在原图中的归一化位置
-        
-        Returns:
-            coords [N_patches, 2]: 归一化坐标 (y, x) in [-1, 1]，
-                                   在全局坐标系中（如果提供了 crop_info）
-        """
-        
-        # Calculate number of patches along H and W
         n_h = (H - self.patch_size) // self.stride + 1
         n_w = (W - self.patch_size) // self.stride + 1
-        
-        # Generate coordinates in local (padded image) space
-        # Center of first patch: P/2
-        # Center of second patch: P/2 + S
         y_centers_local = torch.arange(n_h, device=device) * self.stride + self.patch_size / 2
         x_centers_local = torch.arange(n_w, device=device) * self.stride + self.patch_size / 2
-        
-        # ============================================================================
-        # Global Coordinate Transformation
-        # 全局坐标变换：将局部补丁中心坐标还原为原图全局坐标
-        # ============================================================================
-        
-        if crop_info is not None and H_orig is not None and W_orig is not None:
-            # crop_info = [top_norm, left_norm, crop_h_norm, crop_w_norm]
-            # 其中每个值都是相对于原图尺寸的归一化量
-            
+        if crop_info is not None and H_orig is not None and (W_orig is not None):
             crop_info = crop_info.to(device)
-            top_norm, left_norm, crop_h_norm, crop_w_norm = crop_info
-            
-            # 还原像素坐标
+            (top_norm, left_norm, crop_h_norm, crop_w_norm) = crop_info
             top_pix = top_norm * H_orig
             left_pix = left_norm * W_orig
             crop_h_pix = crop_h_norm * H_orig
             crop_w_pix = crop_w_norm * W_orig
-            
-            # 局部坐标 [0, H] 映射到全局坐标
-            # y_global_pix = y_local + top_pix
-            # x_global_pix = x_local + left_pix
             y_centers_global = y_centers_local + top_pix
             x_centers_global = x_centers_local + left_pix
-            
-            # 基于原图尺寸进行归一化到 [-1, 1]
-            y_norm = (y_centers_global / H_orig) * 2 - 1
-            x_norm = (x_centers_global / W_orig) * 2 - 1
+            y_norm = y_centers_global / H_orig * 2 - 1
+            x_norm = x_centers_global / W_orig * 2 - 1
         else:
-            # 如果没有 crop_info，使用局部坐标（向后兼容）
-            y_norm = (y_centers_local / H) * 2 - 1
-            x_norm = (x_centers_local / W) * 2 - 1
-        
-        # Grid [N_h, N_w, 2]
-        grid_y, grid_x = torch.meshgrid(y_norm, x_norm, indexing='ij')
-        coords = torch.stack([grid_y, grid_x], dim=-1)  # [Nh, Nw, 2] (y, x) order
-        
-        return coords.reshape(-1, 2)  # [N_patches, 2]
+            y_norm = y_centers_local / H * 2 - 1
+            x_norm = x_centers_local / W * 2 - 1
+        (grid_y, grid_x) = torch.meshgrid(y_norm, x_norm, indexing='ij')
+        coords = torch.stack([grid_y, grid_x], dim=-1)
+        return coords.reshape(-1, 2)
 
     def compute_coefficient_smoothness(self, grid_size=16):
-        """
-        计算像差系数在视场上的空间平滑度 (TV)。
-
-        Args:
-            grid_size: 采样网格大小
-
-        Returns:
-            smoothness: TV loss 标量
-        """
         device = next(self.aberration_net.parameters()).device
         y = torch.linspace(-1, 1, grid_size, device=device)
         x = torch.linspace(-1, 1, grid_size, device=device)
-        grid_y, grid_x = torch.meshgrid(y, x, indexing='ij')
+        (grid_y, grid_x) = torch.meshgrid(y, x, indexing='ij')
         coords = torch.stack([grid_y.flatten(), grid_x.flatten()], dim=1)
-
         coeffs = self.aberration_net(coords)
         coeffs_map = coeffs.view(grid_size, grid_size, -1).permute(2, 0, 1)
-
         dy = torch.abs(coeffs_map[:, 1:, :] - coeffs_map[:, :-1, :]).mean()
         dx = torch.abs(coeffs_map[:, :, 1:] - coeffs_map[:, :, :-1]).mean()
         return dy + dx
 
     def generate_coeffs_map(self, H, W, device, grid_size=16, crop_info=None, batch_size=1):
-        """
-        生成像差系数空间分布图，用于注入到复原网络 (Physics-Aware Restoration)。
-        
-        在粗网格上采样 AberrationNet 预测系数，然后双线性插值到目标分辨率。
-        由于光学像差在空间上是平滑变化的，粗采样 + 插值既高效又物理合理。
-        
-        Args:
-            H, W: 目标分辨率
-            device: 计算设备
-            grid_size: 粗采样网格大小 (默认 16x16 = 256 点)
-            crop_info: [B, 4] 裁剪坐标信息，用于全局坐标对齐。None 则使用局部坐标。
-            batch_size: 批大小
-        
-        Returns:
-            coeffs_map: [B, n_coeffs, H, W] 系数空间分布图
-        """
         with torch.no_grad():
             if crop_info is not None:
-                # 逐样本生成坐标 (每张图的裁剪区域不同)
                 if crop_info.dim() == 1:
                     crop_info = crop_info.unsqueeze(0)
-                
                 all_coords = []
                 for b in range(batch_size):
                     ci = crop_info[b] if b < crop_info.shape[0] else crop_info[0]
-                    top_n, left_n = ci[0].item(), ci[1].item()
-                    h_n, w_n = ci[2].item(), ci[3].item()
-                    
+                    (top_n, left_n) = (ci[0].item(), ci[1].item())
+                    (h_n, w_n) = (ci[2].item(), ci[3].item())
                     if h_n > 0 and w_n > 0:
-                        # 映射到全局坐标 [-1, 1]
                         y_s = top_n * 2 - 1
                         y_e = (top_n + h_n) * 2 - 1
                         x_s = left_n * 2 - 1
                         x_e = (left_n + w_n) * 2 - 1
                     else:
-                        y_s, y_e, x_s, x_e = -1.0, 1.0, -1.0, 1.0
-                    
+                        (y_s, y_e, x_s, x_e) = (-1.0, 1.0, -1.0, 1.0)
                     y = torch.linspace(y_s, y_e, grid_size, device=device)
                     x = torch.linspace(x_s, x_e, grid_size, device=device)
-                    gy, gx = torch.meshgrid(y, x, indexing='ij')
-                    coords = torch.stack([gy.flatten(), gx.flatten()], dim=1)  # [G^2, 2]
+                    (gy, gx) = torch.meshgrid(y, x, indexing='ij')
+                    coords = torch.stack([gy.flatten(), gx.flatten()], dim=1)
                     all_coords.append(coords)
-                
-                # 批量前向: [B*G^2, 2] -> [B*G^2, n_coeffs]
                 all_coords_cat = torch.cat(all_coords, dim=0)
                 all_coeffs = self.aberration_net(all_coords_cat)
                 n_coeffs = all_coeffs.shape[1]
-                
-                # 重塑为 [B, n_coeffs, G, G]，然后插值
                 all_coeffs = all_coeffs.view(batch_size, grid_size, grid_size, n_coeffs)
-                all_coeffs = all_coeffs.permute(0, 3, 1, 2)  # [B, n_coeffs, G, G]
+                all_coeffs = all_coeffs.permute(0, 3, 1, 2)
                 coeffs_map = F.interpolate(all_coeffs, size=(H, W), mode='bilinear', align_corners=True)
             else:
-                # 无裁剪信息: 所有样本共享同一坐标网格
                 y = torch.linspace(-1, 1, grid_size, device=device)
                 x = torch.linspace(-1, 1, grid_size, device=device)
-                gy, gx = torch.meshgrid(y, x, indexing='ij')
-                coords = torch.stack([gy.flatten(), gx.flatten()], dim=1)  # [G^2, 2]
-                
-                coeffs = self.aberration_net(coords)  # [G^2, n_coeffs]
+                (gy, gx) = torch.meshgrid(y, x, indexing='ij')
+                coords = torch.stack([gy.flatten(), gx.flatten()], dim=1)
+                coeffs = self.aberration_net(coords)
                 n_coeffs = coeffs.shape[1]
-                
                 cmap = coeffs.view(1, grid_size, grid_size, n_coeffs).permute(0, 3, 1, 2)
                 cmap = F.interpolate(cmap, size=(H, W), mode='bilinear', align_corners=True)
-                coeffs_map = cmap.expand(batch_size, -1, -1, -1)  # [B, n_coeffs, H, W]
-            
+                coeffs_map = cmap.expand(batch_size, -1, -1, -1)
             return coeffs_map
 
     def forward(self, x_hat, crop_info=None):
-        """
-        x_hat: [B, C, H, W] (输入图像)
-        crop_info: 可选，[top/H_orig, left/W_orig, crop_h/H_orig, crop_w/W_orig] 
-                   用于全局坐标对齐。如果为 None，使用局部坐标（向后兼容）。
-        
-        Returns: y_hat [B, C, H, W] (模糊图像)
-        """
-        B, C, H, W = x_hat.shape
+        (B, C, H, W) = x_hat.shape
         P = self.patch_size
         S = self.stride
         K = self.kernel_size
-        
-        # 0. [Priority S] 反 Gamma 变换：sRGB -> Linear
-        # 物理卷积（光学模糊）必须在线性光域进行，否则会导致 PSF 预测偏差
-        # 安全性: 确保输入非负，防止 NaN
         x_linear = (F.relu(x_hat) + self.epsilon).pow(self.gamma)
-        
-        # 1. Pad Input to ensure patches cover everything nicely
-        # We need H, W to be P + k*S.
-        # Or simply Unfold and Fold handles padding?
-        # F.fold requires output_size to be specified.
-        # If we just pad x_hat so that it fits unfold perfectly.
-        '''
-        原始图像: 512×512
-补丁大小 P = 128, 步长 S = 64
-
-计算补丁数:
-n_h = (512 - 128) / 64 + 1 = 7
-
-但最后一个补丁起始位置: 6 × 64 = 384
-最后一个补丁范围: [384, 512) - 只覆盖到 512
-缺失像素: 无
-
-但如果是 513×513:
-n_h = (513 - 128) / 64 + 1 = 7.03 → 7 (整除)
-最后像素 513 无法被覆盖
-
-所以需要填充:
-513 + pad = 576 (能整除)
-pad_h = (64 - (513 - 128) % 64) % 64 = (64 - 1) % 64 = 63
-        '''
         pad_h = (S - (H - P) % S) % S
         pad_w = (S - (W - P) % S) % S
-        
-        # Also need to handle if H < P
-        if H < P: pad_h += P - H
-        if W < P: pad_w += P - W
-        
-        # Check if padding is too large for reflect mode
-        # Reflect padding requires input_dim >= pad
-        # If input size is smaller than padding, reflect mode will crash.
+        if H < P:
+            pad_h += P - H
+        if W < P:
+            pad_w += P - W
         if H < pad_h or W < pad_w:
-            mode_pad = 'replicate' # Fallback for very small images
+            mode_pad = 'replicate'
         else:
             mode_pad = 'reflect'
-            
         x_padded = F.pad(x_linear, (0, pad_w, 0, pad_h), mode=mode_pad)
-        
-        H_pad, W_pad = x_padded.shape[2:]
-        
-        # 2. Unfold
-        # [B, C*P*P, N_blocks]
-        '''
-[B, C, H_pad, W_pad] 
-    ↓
-[B, C*P*P, N_patches]  ← 每列是一个 P×P 补丁的展平版本
-    ↓
-reshape → [B*N_patches, C, P, P]
-
-例如 B=2, C=3, N_patches=64:
-[2, 3*128*128, 64]
-    ↓
-[2, 49152, 64]
-    ↓
-[128, 3, 128, 128]
-        '''
+        (H_pad, W_pad) = x_padded.shape[2:]
+        '\n[B, C, H_pad, W_pad] \n    ↓\n[B, C*P*P, N_patches]  ← 每列是一个 P×P 补丁的展平版本\n    ↓\nreshape → [B*N_patches, C, P, P]\n例如 B=2, C=3, N_patches=64:\n[2, 3*128*128, 64]\n    ↓\n[2, 49152, 64]\n    ↓\n[128, 3, 128, 128]\n        '
         patches_unfolded = F.unfold(x_padded, kernel_size=P, stride=S)
         N_patches = patches_unfolded.shape[2]
-        
-        # Reshape to [B * N_patches, C, P, P]
-        # Transpose to [B, N_patches, C*P*P]
         patches_unfolded = patches_unfolded.transpose(1, 2)
-        # Reshape
         patches = patches_unfolded.reshape(B * N_patches, C, P, P)
-        
-        # 3. Generate Kernels
-        # Get coordinates for ALL patches (same for every item in batch)
-        # [N_patches, 2]
-        '''
-        不同补丁使用不同的卷积核:
-        补丁 1 (中心: 图像左上)
-  ├─ 坐标 (-0.778, -0.778)
-    ├─ AberrationNet 预测系数 [a₁, a₂, ..., a₃₆]
-  └─ ZernikeGenerator → PSF 核 K₁ [3, 31, 31]
-
-补丁 2 (中心: 图像中心)
-  ├─ 坐标 (0, 0)
-    ├─ AberrationNet 预测系数 [a'₁, a'₂, ..., a'₃₆]
-  └─ ZernikeGenerator → PSF 核 K₂ [3, 31, 31]
-
-补丁 64 (中心: 图像右下)
-  ├─ 坐标 (0.778, 0.778)
-    ├─ AberrationNet 预测系数 [a''₁, a''₂, ..., a''₃₆]
-  └─ ZernikeGenerator → PSF 核 K₆₄ [3, 31, 31]
-        '''
-        # 光学系统的像差通常随视场角变化（如边缘失焦）
-        # 中心清晰 → 边缘模糊的真实光学现象
-
-        # 获取补丁中心坐标，支持全局坐标对齐（逐样本）
+        "\n        不同补丁使用不同的卷积核:\n        补丁 1 (中心: 图像左上)\n  ├─ 坐标 (-0.778, -0.778)\n    ├─ AberrationNet 预测系数 [a₁, a₂, ..., a₃₆]\n  └─ ZernikeGenerator → PSF 核 K₁ [3, 31, 31]\n补丁 2 (中心: 图像中心)\n  ├─ 坐标 (0, 0)\n    ├─ AberrationNet 预测系数 [a'₁, a'₂, ..., a'₃₆]\n  └─ ZernikeGenerator → PSF 核 K₂ [3, 31, 31]\n补丁 64 (中心: 图像右下)\n  ├─ 坐标 (0.778, 0.778)\n    ├─ AberrationNet 预测系数 [a''₁, a''₂, ..., a''₃₆]\n  └─ ZernikeGenerator → PSF 核 K₆₄ [3, 31, 31]\n        "
         if crop_info is not None:
-            # crop_info: [B, 4] 或 [4,]
             if crop_info.dim() == 1:
                 crop_info = crop_info.unsqueeze(0)
-
             coords_list = []
             for b in range(B):
                 crop_info_single = crop_info[b]
-
-                # 反解原始图像尺寸（基于 crop_info 推断）
                 crop_h_norm = crop_info_single[2].item()
                 crop_w_norm = crop_info_single[3].item()
-
                 if crop_h_norm > 0 and crop_w_norm > 0:
                     H_orig = int(H / crop_h_norm)
                     W_orig = int(W / crop_w_norm)
@@ -508,28 +136,14 @@ reshape → [B*N_patches, C, P, P]
                     H_orig = H
                     W_orig = W
                     crop_info_single = None
-
-                coords_1img = self.get_patch_centers(
-                    H_pad, W_pad, x_hat.device,
-                    H_orig=H_orig, W_orig=W_orig,
-                    crop_info=crop_info_single
-                )
+                coords_1img = self.get_patch_centers(H_pad, W_pad, x_hat.device, H_orig=H_orig, W_orig=W_orig, crop_info=crop_info_single)
                 coords_list.append(coords_1img)
-
-            # [B * N_patches, 2]
             coords = torch.cat(coords_list, dim=0)
         else:
-            # 向后兼容：没有 crop_info 时使用局部坐标
             coords_1img = self.get_patch_centers(H_pad, W_pad, x_hat.device)
             coords = coords_1img.repeat(B, 1)
-        
-        # AberrationNet -> Coeffs
-        coeffs = self.aberration_net(coords) # [B*N, Ncoeff]
-        
-        # ZernikeGenerator -> Kernels
-        kernels = self.zernike_generator(coeffs) # [B*N, C_k, K, K]
-        
-        # Check channel consistency and determine output channels
+        coeffs = self.aberration_net(coords)
+        kernels = self.zernike_generator(coeffs)
         C_k = kernels.shape[1]
         if C == C_k:
             C_out = C
@@ -538,170 +152,41 @@ reshape → [B*N_patches, C, P, P]
         elif C > 1 and C_k == 1:
             C_out = C
         else:
-            raise ValueError(f"Channel mismatch: Input ({C}) and Kernel ({C_k}) are not compatible for broadcasting.")
-        
-        # 4. Convolution Implementation
-        # 卷积实现：使用 PyTorch 原生空域卷积 (cuDNN 优化)
-        
-        # -------------------------------------------------------------------------
-        # Spatial Domain Convolution (GPU-optimized via cuDNN)
-        # 空间域卷积：在 GPU 上直接进行卷积运算
-        # 完全省略傅里叶变换步骤。对于小尺寸卷积核 (如 31x31)，这比 FFT 转换快得多，
-        # 且能充分利用 GPU 的并行计算能力。
-        # -------------------------------------------------------------------------
-        
-        # Flip kernel for F.conv2d (Correlation -> Convolution)
-        # 注意：F.conv2d 计算的是相关性 (Correlation)，而物理光学定义的是卷积 (Convolution)
-        # 因此需要在空间域对卷积核进行上下左右翻转。
+            raise ValueError(f'Channel mismatch: Input ({C}) and Kernel ({C_k}) are not compatible for broadcasting.')
         kernels_flipped = torch.flip(kernels, dims=[-2, -1])
-        
-        # 使用 Grouped Convolution 实现动态卷积 (Dynamic Convolution)
-        # 将 Batch 中每个样本的 Patch 与其对应的 Kernel 进行卷积
-        BN = patches.shape[0]  # B * N_patches
+        BN = patches.shape[0]
         pad = K // 2
-        
-        # Pad input patches to maintain size: P x P -> P x P
         patches_padded = F.pad(patches, (pad, pad, pad, pad), mode='constant', value=0)
-        
         if C == C_k:
-            # Case 1: Same channels (Color -> Color)
-            # 使用 grouped convolution: groups=BN*C，实现每个通道独立的局部卷积
-            patches_grouped = patches_padded.view(1, BN * C,
-                                                   patches_padded.shape[2],
-                                                   patches_padded.shape[3])
+            patches_grouped = patches_padded.view(1, BN * C, patches_padded.shape[2], patches_padded.shape[3])
             kernels_grouped = kernels_flipped.view(BN * C, 1, K, K)
             y_grouped = F.conv2d(patches_grouped, kernels_grouped, groups=BN * C)
             y_patches = y_grouped.view(BN, C, P, P)
             C_out = C
-            
         elif C == 1 and C_k > 1:
-            # Case 2: Grayscale input -> Multi-channel Kernel (e.g., BW -> RGB aberration)
             patches_expanded = patches_padded.expand(-1, C_k, -1, -1)
-            patches_grouped = patches_expanded.reshape(1, BN * C_k,
-                                                        patches_padded.shape[2],
-                                                        patches_padded.shape[3])
+            patches_grouped = patches_expanded.reshape(1, BN * C_k, patches_padded.shape[2], patches_padded.shape[3])
             kernels_grouped = kernels_flipped.view(BN * C_k, 1, K, K)
             y_grouped = F.conv2d(patches_grouped, kernels_grouped, groups=BN * C_k)
             y_patches = y_grouped.view(BN, C_k, P, P)
             C_out = C_k
-            
-        else:  # C > 1 and C_k == 1
-            # Case 3: Multi-channel input -> Single Kernel (e.g., RGB -> Scalar aberration)
+        else:
             kernels_expanded = kernels_flipped.expand(-1, C, -1, -1)
-            patches_grouped = patches_padded.view(1, BN * C,
-                                                   patches_padded.shape[2],
-                                                   patches_padded.shape[3])
+            patches_grouped = patches_padded.view(1, BN * C, patches_padded.shape[2], patches_padded.shape[3])
             kernels_grouped = kernels_expanded.reshape(BN * C, 1, K, K)
             y_grouped = F.conv2d(patches_grouped, kernels_grouped, groups=BN * C)
             y_patches = y_grouped.view(BN, C, P, P)
             C_out = C
-        
-        # 5. Apply Window and Fold
-        # Explicit dimension expansion for window
         window_4d = self.window.view(1, 1, P, P)
         y_patches = y_patches * window_4d
-        
-        # Reshape for folding: [B, C_out*P*P, N_patches]
-        # Use C_out here
-        y_patches_reshaped = y_patches.reshape(B, N_patches, C_out*P*P).transpose(1, 2)
-        
+        y_patches_reshaped = y_patches.reshape(B, N_patches, C_out * P * P).transpose(1, 2)
         output_h = H_pad
         output_w = W_pad
-        
-        # Output will have C_out channels
         y_accum = F.fold(y_patches_reshaped, output_size=(output_h, output_w), kernel_size=P, stride=S)
-        
-        # 6. Normalization Map
-        # Weight patches: ones * window
-        # Expand match C_out
         w_patches = window_4d.expand(B * N_patches, C_out, P, P)
-        w_patches_reshaped = w_patches.reshape(B, N_patches, C_out*P*P).transpose(1, 2)
-        
+        w_patches_reshaped = w_patches.reshape(B, N_patches, C_out * P * P).transpose(1, 2)
         w_accum = F.fold(w_patches_reshaped, output_size=(output_h, output_w), kernel_size=P, stride=S)
-        
-        # Normalize
-        y_hat_padded = y_accum / (w_accum + 1e-8)
-        
-        # Crop back to original size
+        y_hat_padded = y_accum / (w_accum + 1e-08)
         y_hat = y_hat_padded[..., :H, :W]
-        
-        # [Priority S] Gamma 变换：Linear -> sRGB
-        # 将卷积后的线性图转回 sRGB 域，以便与 GT (sRGB) 计算 Loss
-        y_hat = (y_hat.clamp(min=self.epsilon)).pow(1.0 / self.gamma)
-        
+        y_hat = y_hat.clamp(min=self.epsilon).pow(1.0 / self.gamma)
         return y_hat
-'''
-Overlap-Add 可视化:
-
-补丁 1 (像素 [0:128, 0:128])  +  Hann 窗口
-补丁 2 (像素 [64:192, 0:128]) +  Hann 窗口
-         ↓ 重叠区间 [64:128]
-    两个补丁的输出在此相加
-
-Fold 过程:
-   [0:64]       [64:128]      [128:192]
-  ┌─────────┬─────────┬─────────┐
-  │ 补丁1   │ 补丁1/2 │ 补丁2   │
-  │ (仅窗口)│ (相加)  │ (仅窗口)│
-  └─────────┴─────────┴─────────┘
-  
-加权归一化：
-result[64:128] = (patch1_out + patch2_out) / (w1 + w2)
-                = (w1*信号1 + w2*信号2) / (w1 + w2)  ← 加权平均
-'''
-
-'''
-                    输入图像 x_hat
-                        │
-                        ▼
-                    Unfold (分割)
-                        │
-        ┌───────────────┴───────────────┐
-        │                               │
-        ▼                               ▼
-    补丁集合                        坐标集合
-  (N 个 128×128)                   (N 个坐标)
-        │                               │
-        │                   AberrationNet(坐标)
-        │                        │
-        │                        ▼
-        │                   Zernike 系数
-        │                        │
-        │                   ZernikeGenerator
-        │                        │
-        │                        ▼
-        │                    PSF 核集合
-        │                   (N 个 31×31)
-        │                        │
-        └───────┬─────────────────┘
-                ▼
-        FFT 卷积 (补丁 ⊗ PSF)
-                │
-                ▼
-        卷积后补丁
-      (N 个 128×128)
-                │
-                ├─ Hann 窗口加权 ─────┐
-                │                     │
-                ▼                     ▼
-        加权后补丁              权重补丁
-        y_patches             w_patches
-                │                     │
-                └──────┬──────────────┘
-                       ▼
-                  Fold (拼接)
-                       │
-        ┌──────────────┴──────────────┐
-        ▼                             ▼
-   y_accum                       w_accum
-  (累积输出)                     (累积权重)
-        │                             │
-        └──────┬──────────────────────┘
-               ▼
-        y_accum / w_accum
-             (归一化)
-               ▼
-        裁剪回原尺寸
-               ▼
-        最终模糊图像 y_hat
-'''
