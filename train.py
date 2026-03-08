@@ -236,6 +236,10 @@ def main():
                     v_str = f'{v:.6f}' if isinstance(v, float) else str(v)
                 print(f'    {k}: {v_str}')
         train_metrics = {'loss': avg_loss, 'loss_data': avg_loss_data, 'loss_sup': avg_loss_sup}
+        if 'metrics' in locals() and isinstance(metrics, dict):
+            for k, v in metrics.items():
+                if isinstance(k, str) and k.startswith('newbp/') and isinstance(v, (int, float)):
+                    train_metrics[k] = float(v)
         trainer.log_to_tensorboard(train_metrics, current_epoch, prefix='train')
         trainer.log_to_tensorboard(val_metrics, current_epoch, prefix='val')
         lr_info = trainer.get_current_lr()

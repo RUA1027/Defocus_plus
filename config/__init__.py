@@ -43,10 +43,58 @@ class MLPConfig:
     a_max_mlp: float = 3.0
 
 @dataclass
+class LocalJointInputConfig:
+    enabled: bool = True
+    kernel_size: int = 3
+    padding_mode: str = 'replicate'
+
+@dataclass
+class NewBPGroupsConfig:
+    special: List[int] = field(default_factory=lambda : [1, 2, 3])
+    low: List[int] = field(default_factory=lambda : [4, 5, 6])
+    mid: List[int] = field(default_factory=lambda : [7, 8, 9, 10, 11, 12, 13, 14, 15])
+    high: List[int] = field(default_factory=lambda : [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36])
+
+@dataclass
+class NewBPGroupParamsConfig:
+    alpha: float = 1.0
+    amax: float = 0.3
+    bias: float = 0.0
+    eps: float = 1e-6
+    gss: float = 1.0
+    p_sat: float = 2.5
+
+@dataclass
+class NewBPLearnableConfig:
+    bias: bool = True
+    alpha: bool = False
+    amax: bool = False
+    gss: bool = False
+    p_sat: bool = False
+
+@dataclass
+class NewBPParamsConfig:
+    special: NewBPGroupParamsConfig = field(default_factory=lambda : NewBPGroupParamsConfig(alpha=1.0, amax=0.35, bias=0.0, eps=1e-6, gss=1.0, p_sat=4.0))
+    low: NewBPGroupParamsConfig = field(default_factory=lambda : NewBPGroupParamsConfig(alpha=1.0, amax=0.3, bias=0.0, eps=1e-6, gss=1.0, p_sat=4.0))
+    mid: NewBPGroupParamsConfig = field(default_factory=lambda : NewBPGroupParamsConfig(alpha=1.0, amax=0.18, bias=0.0, eps=1e-6, gss=1.0, p_sat=2.5))
+    high: NewBPGroupParamsConfig = field(default_factory=lambda : NewBPGroupParamsConfig(alpha=1.0, amax=0.1, bias=0.0, eps=1e-6, gss=1.0, p_sat=1.2))
+
+@dataclass
+class NewBPConfig:
+    implementation: str = 'native_autograd'
+    separate_special_group: bool = True
+    groups: NewBPGroupsConfig = field(default_factory=NewBPGroupsConfig)
+    params: NewBPParamsConfig = field(default_factory=NewBPParamsConfig)
+    learnable: NewBPLearnableConfig = field(default_factory=NewBPLearnableConfig)
+
+@dataclass
 class AberrationNetConfig:
     n_coeffs: int = 36
     a_max: float = 2.0
     mlp: MLPConfig = field(default_factory=MLPConfig)
+    use_local_grouped_newbp: bool = True
+    local_joint_input: LocalJointInputConfig = field(default_factory=LocalJointInputConfig)
+    newbp: NewBPConfig = field(default_factory=NewBPConfig)
 
 @dataclass
 class RestorationNetConfig:
@@ -94,6 +142,8 @@ class TrainingConfig:
     smoothness_grid_size: int = 16
     accumulation_steps: int = 1
     stage_schedule: StageScheduleConfig = field(default_factory=StageScheduleConfig)
+    keep_coeff_loss: bool = True
+    keep_smooth_loss: bool = True
 
 @dataclass
 class AugmentationConfig:
@@ -255,14 +305,39 @@ def _build_config_from_dict(data: Dict[str, Any]) -> Config:
     ola = _dict_to_dataclass(OLAConfig, data.get('ola', {}))
     ab_data = data.get('aberration_net', {})
     mlp = _dict_to_dataclass(MLPConfig, ab_data.get('mlp', {}))
-    aberration_net = AberrationNetConfig(n_coeffs=ab_data.get('n_coeffs', 36), a_max=ab_data.get('a_max', 2.0), mlp=mlp)
+    local_joint_input = _dict_to_dataclass(LocalJointInputConfig, ab_data.get('local_joint_input', {}))
+    nb_data = ab_data.get('newbp', {})
+    nb_groups = _dict_to_dataclass(NewBPGroupsConfig, nb_data.get('groups', {}))
+    nb_params_data = nb_data.get('params', {})
+    nb_params = NewBPParamsConfig(
+        special=_dict_to_dataclass(NewBPGroupParamsConfig, nb_params_data.get('special', {})),
+        low=_dict_to_dataclass(NewBPGroupParamsConfig, nb_params_data.get('low', {})),
+        mid=_dict_to_dataclass(NewBPGroupParamsConfig, nb_params_data.get('mid', {})),
+        high=_dict_to_dataclass(NewBPGroupParamsConfig, nb_params_data.get('high', {})),
+    )
+    nb_learnable = _dict_to_dataclass(NewBPLearnableConfig, nb_data.get('learnable', {}))
+    newbp = NewBPConfig(
+        implementation=nb_data.get('implementation', 'native_autograd'),
+        separate_special_group=nb_data.get('separate_special_group', True),
+        groups=nb_groups,
+        params=nb_params,
+        learnable=nb_learnable,
+    )
+    aberration_net = AberrationNetConfig(
+        n_coeffs=ab_data.get('n_coeffs', 36),
+        a_max=ab_data.get('a_max', 2.0),
+        mlp=mlp,
+        use_local_grouped_newbp=ab_data.get('use_local_grouped_newbp', True),
+        local_joint_input=local_joint_input,
+        newbp=newbp,
+    )
     restoration_net = _dict_to_dataclass(RestorationNetConfig, data.get('restoration_net', {}))
     tr_data = data.get('training', {})
     optimizer = _dict_to_dataclass(OptimizerConfig, tr_data.get('optimizer', {}))
     loss = _dict_to_dataclass(LossConfig, tr_data.get('loss', {}))
     gradient_clip = _dict_to_dataclass(GradientClipConfig, tr_data.get('gradient_clip', {}))
     stage_schedule = _dict_to_dataclass(StageScheduleConfig, tr_data.get('stage_schedule', {}))
-    training = TrainingConfig(optimizer=optimizer, loss=loss, gradient_clip=gradient_clip, stage_weights=tr_data.get('stage_weights', {}), smoothness_grid_size=tr_data.get('smoothness_grid_size', 16), accumulation_steps=tr_data.get('accumulation_steps', 1), stage_schedule=stage_schedule)
+    training = TrainingConfig(optimizer=optimizer, loss=loss, gradient_clip=gradient_clip, stage_weights=tr_data.get('stage_weights', {}), smoothness_grid_size=tr_data.get('smoothness_grid_size', 16), accumulation_steps=tr_data.get('accumulation_steps', 1), stage_schedule=stage_schedule, keep_coeff_loss=tr_data.get('keep_coeff_loss', True), keep_smooth_loss=tr_data.get('keep_smooth_loss', True))
     d_data = data.get('data', {})
     augmentation = _dict_to_dataclass(AugmentationConfig, d_data.get('augmentation', {}))
     data_config = DataConfig(data_root=d_data.get('data_root', 'data/dd_dp_dataset_png'), batch_size=d_data.get('batch_size', 2), image_height=d_data.get('image_height', 1120), image_width=d_data.get('image_width', 1680), crop_size=d_data.get('crop_size', 512), val_crop_size=d_data.get('val_crop_size', 1024), num_workers=d_data.get('num_workers', 4), repeat_factor=d_data.get('repeat_factor', 100), augmentation=augmentation)

@@ -40,6 +40,54 @@ aberration_net:
   # 必须与 physics.n_modes 保持一致
   n_coeffs: 36                   # 输出 Zernike 系数数量
   a_max: 1.5                     # 系数约束范围 [-a_max, a_max]
+  use_local_grouped_newbp: true
+
+  local_joint_input:
+    enabled: true
+    kernel_size: 3
+    padding_mode: "replicate"
+
+  newbp:
+    implementation: "native_autograd"
+    separate_special_group: true
+    groups:
+      special: [1, 2, 3]
+      low: [4, 5, 6]
+      mid: [7, 8, 9, 10, 11, 12, 13, 14, 15]
+      high: [16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36]
+    params:
+      special:
+        alpha: 1.0
+        amax: 0.35
+        bias: 0.0
+        eps: 1.0e-6
+      low:
+        alpha: 1.0
+        amax: 0.30
+        bias: 0.0
+        eps: 1.0e-6
+        gss: 1.0
+        p_sat: 4.0
+      mid:
+        alpha: 1.0
+        amax: 0.18
+        bias: 0.0
+        eps: 1.0e-6
+        gss: 1.0
+        p_sat: 2.5
+      high:
+        alpha: 1.0
+        amax: 0.10
+        bias: 0.0
+        eps: 1.0e-6
+        gss: 1.0
+        p_sat: 1.2
+    learnable:
+      bias: true
+      alpha: false
+      amax: false
+      gss: false
+      p_sat: false
   
   
   
@@ -89,17 +137,20 @@ training:
   loss:
     lambda_sup: 1.0              # 监督损失权重 (默认值，实际由 stage_weights 覆盖)
     lambda_fft: 0.01              # 频域损失权重 (Charbonnier + FFT)
-    lambda_coeff: 0.05           # 系数正则权重
-    lambda_smooth: 0.1           # 平滑正则权重
+    lambda_coeff: 0.0            # NewBP 启用时关闭
+    lambda_smooth: 0.0           # NewBP 启用时关闭
     lambda_image_reg: 0.001      # 图像 TV 正则权重
+
+  keep_coeff_loss: false
+  keep_smooth_loss: false
   
   # 三阶段损失权重配置 (Stage Weights)
   # 这里定义每个阶段具体的权重组合
   stage_weights:
     physics_only:                   # 第一阶段：专攻物理
       w_data: 1.0
-      w_smooth: 0.1                 # 需要较强平滑约束
-      w_coeff: 0.05                 # 需要限制系数大小
+      w_smooth: 0.0
+      w_coeff: 0.0
       w_img_reg: 0.0
     
     restoration_fixed_physics:      # 第二阶段：物理当裁判，练复原
@@ -112,8 +163,8 @@ training:
     joint:                          # 第三阶段：一起微调
       w_data: 0.3
       w_sup: 1.0                    # 图像监督 (Charbonnier + lambda_fft * FFT)
-      w_smooth: 0.02
-      w_coeff: 0.01
+      w_smooth: 0.0
+      w_coeff: 0.0
       w_img_reg: 0.0001
   
   # 梯度裁剪

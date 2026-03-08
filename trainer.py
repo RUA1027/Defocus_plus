@@ -42,7 +42,7 @@ class FFTLoss(nn.Module):
 class DualBranchTrainer:
     VALID_STAGES = ('physics_only', 'restoration_fixed_physics', 'joint', 'restoration_only')
 
-    def __init__(self, restoration_net, physical_layer, lr_restoration, lr_optics, optimizer_type='adamw', weight_decay=0.0, lambda_sup=1.0, lambda_fft=0.1, lambda_coeff=0.05, lambda_smooth=0.1, lambda_image_reg=0.0, grad_clip_restoration=5.0, grad_clip_optics=1.0, stage_schedule=None, stage_weights=None, smoothness_grid_size=16, injection_grid_size=16, use_amp=True, amp_dtype='float16', device='cuda', accumulation_steps=4, tensorboard_dir=None):
+    def __init__(self, restoration_net, physical_layer, lr_restoration, lr_optics, optimizer_type='adamw', weight_decay=0.0, lambda_sup=1.0, lambda_fft=0.1, lambda_coeff=0.05, lambda_smooth=0.1, lambda_image_reg=0.0, grad_clip_restoration=5.0, grad_clip_optics=1.0, stage_schedule=None, stage_weights=None, smoothness_grid_size=16, injection_grid_size=16, use_amp=True, amp_dtype='float16', device='cuda', accumulation_steps=4, keep_coeff_loss=True, keep_smooth_loss=True, tensorboard_dir=None):
         self.device = device
         self.restoration_net = restoration_net.to(device)
         self.physical_layer = physical_layer.to(device) if physical_layer is not None else None
@@ -73,6 +73,8 @@ class DualBranchTrainer:
         self.lambda_coeff = lambda_coeff
         self.lambda_smooth = lambda_smooth
         self.lambda_image_reg = lambda_image_reg
+        self.keep_coeff_loss = bool(keep_coeff_loss)
+        self.keep_smooth_loss = bool(keep_smooth_loss)
         self.stage_weights = stage_weights if stage_weights is not None else {}
         default_schedule = {'stage1_epochs': 50, 'stage2_epochs': 200, 'stage3_epochs': 50}
         self.stage_schedule: Any = stage_schedule if stage_schedule is not None else default_schedule
@@ -295,6 +297,10 @@ class DualBranchTrainer:
         w_smooth = weights['w_smooth']
         w_coeff = weights['w_coeff']
         w_img_reg = weights['w_img_reg']
+        if not self.keep_coeff_loss:
+            w_coeff = 0.0
+        if not self.keep_smooth_loss:
+            w_smooth = 0.0
         Y_blur = Y_blur.to(self.device)
         X_gt = X_gt.to(self.device)
         if crop_info is not None:
@@ -444,7 +450,12 @@ class DualBranchTrainer:
             self.history['loss_data'].append(loss_data_w.item())
             self.history['grad_norm_W'].append(gn_W.item() if isinstance(gn_W, torch.Tensor) else gn_W)
             self.history['grad_norm_Theta'].append(gn_Theta.item() if isinstance(gn_Theta, torch.Tensor) else gn_Theta)
-        return {'loss': total_loss.item(), 'loss_data': loss_data_w.item(), 'loss_sup': loss_sup_w.item(), 'loss_coeff': loss_coeff_w.item(), 'loss_smooth': loss_smooth_w.item(), 'loss_image_reg': loss_image_reg_w.item(), 'loss_data_raw': loss_data.item(), 'loss_sup_raw': loss_sup.item(), 'loss_coeff_raw': loss_coeff.item(), 'loss_smooth_raw': loss_smooth.item(), 'loss_image_reg_raw': loss_image_reg.item(), 'grad_W': gn_W.item() if isinstance(gn_W, torch.Tensor) else gn_W, 'grad_Theta': gn_Theta.item() if isinstance(gn_Theta, torch.Tensor) else gn_Theta, 'stage': current_stage}
+        metrics = {'loss': total_loss.item(), 'loss_data': loss_data_w.item(), 'loss_sup': loss_sup_w.item(), 'loss_coeff': loss_coeff_w.item(), 'loss_smooth': loss_smooth_w.item(), 'loss_image_reg': loss_image_reg_w.item(), 'loss_data_raw': loss_data.item(), 'loss_sup_raw': loss_sup.item(), 'loss_coeff_raw': loss_coeff.item(), 'loss_smooth_raw': loss_smooth.item(), 'loss_image_reg_raw': loss_image_reg.item(), 'grad_W': gn_W.item() if isinstance(gn_W, torch.Tensor) else gn_W, 'grad_Theta': gn_Theta.item() if isinstance(gn_Theta, torch.Tensor) else gn_Theta, 'stage': current_stage}
+        if self.physical_layer is not None and hasattr(self.physical_layer, 'get_newbp_stats'):
+            nb_stats = self.physical_layer.get_newbp_stats()
+            for k, v in nb_stats.items():
+                metrics[f'newbp/{k}'] = float(v)
+        return metrics
 
     def compute_image_tv_loss(self, img):
         (B, C, H, W) = img.shape
@@ -458,6 +469,9 @@ class DualBranchTrainer:
         if self.aberration_net is not None:
             aberration_state = {k: v for (k, v) in self.aberration_net.state_dict().items() if 'total_ops' not in k and 'total_params' not in k}
             checkpoint['aberration_net'] = aberration_state
+        if self.physical_layer is not None:
+            physical_state = {k: v for (k, v) in self.physical_layer.state_dict().items() if 'total_ops' not in k and 'total_params' not in k}
+            checkpoint['physical_layer'] = physical_state
         if self.optimizer_Theta is not None:
             checkpoint['optimizer_Theta'] = self.optimizer_Theta.state_dict()
         if epoch is not None:
@@ -474,7 +488,10 @@ class DualBranchTrainer:
         self.restoration_net.load_state_dict(restoration_state, strict=True)
         if self.aberration_net is not None and 'aberration_net' in checkpoint:
             aberration_state = {k: v for (k, v) in checkpoint['aberration_net'].items() if 'total_ops' not in k and 'total_params' not in k}
-            self.aberration_net.load_state_dict(aberration_state, strict=True)
+            self.aberration_net.load_state_dict(aberration_state, strict=False)
+        if self.physical_layer is not None and 'physical_layer' in checkpoint:
+            physical_state = {k: v for (k, v) in checkpoint['physical_layer'].items() if 'total_ops' not in k and 'total_params' not in k}
+            self.physical_layer.load_state_dict(physical_state, strict=False)
         if load_optimizer:
             if 'optimizer_W' in checkpoint:
                 self.optimizer_W.load_state_dict(checkpoint['optimizer_W'])

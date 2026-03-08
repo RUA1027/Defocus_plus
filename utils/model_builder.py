@@ -7,6 +7,7 @@ from models.zernike import DifferentiableZernikeGenerator
 from models.aberration_net import AberrationNet
 from models.restoration_net import RestorationNet
 from models.physical_layer import SpatiallyVaryingPhysicalLayer
+from models.local_grouped_newbp import LocalGroupedZernikeNewBP
 from trainer import DualBranchTrainer
 from utils.dpdd_dataset import DPDDDataset, DPDDTestDataset
 from torch.utils.data import DataLoader
@@ -16,9 +17,36 @@ def build_models_from_config(config: Config, device: str):
     zernike_gen = None
     aberration_net = None
     physical_layer = None
+    newbp_layer = None
     if use_physical_layer:
         zernike_gen = DifferentiableZernikeGenerator(n_modes=config.physics.n_modes, pupil_size=config.physics.pupil_size, kernel_size=config.physics.kernel_size, oversample_factor=config.physics.oversample_factor, wavelengths=config.physics.wavelengths, ref_wavelength=config.physics.ref_wavelength, device=device, learnable_wavelengths=getattr(config.physics, 'learnable_wavelengths', False), wavelength_bounds=getattr(config.physics, 'wavelength_bounds', None))
-        aberration_net = AberrationNet(num_coeffs=config.aberration_net.n_coeffs, hidden_dim=config.aberration_net.mlp.hidden_dim, a_max=config.aberration_net.mlp.a_max_mlp, use_fourier=config.aberration_net.mlp.use_fourier).to(device)
+        use_newbp = getattr(config.aberration_net, 'use_local_grouped_newbp', True)
+        aberration_net = AberrationNet(num_coeffs=config.aberration_net.n_coeffs, hidden_dim=config.aberration_net.mlp.hidden_dim, a_max=config.aberration_net.mlp.a_max_mlp, use_fourier=config.aberration_net.mlp.use_fourier, fourier_scale=getattr(config.aberration_net.mlp, 'fourier_scale', 5), output_raw=use_newbp).to(device)
+        newbp_layer = None
+        if use_newbp:
+            groups_cfg = config.aberration_net.newbp.groups
+            params_cfg = config.aberration_net.newbp.params
+            learnable_cfg = config.aberration_net.newbp.learnable
+            newbp_layer = LocalGroupedZernikeNewBP(
+                groups_noll={
+                    'special': list(groups_cfg.special),
+                    'low': list(groups_cfg.low),
+                    'mid': list(groups_cfg.mid),
+                    'high': list(groups_cfg.high),
+                },
+                local_joint_enabled=getattr(config.aberration_net.local_joint_input, 'enabled', True),
+                kernel_size=getattr(config.aberration_net.local_joint_input, 'kernel_size', 3),
+                padding_mode=getattr(config.aberration_net.local_joint_input, 'padding_mode', 'replicate'),
+                implementation=getattr(config.aberration_net.newbp, 'implementation', 'native_autograd'),
+                separate_special_group=getattr(config.aberration_net.newbp, 'separate_special_group', True),
+                params={
+                    'special': vars(params_cfg.special),
+                    'low': vars(params_cfg.low),
+                    'mid': vars(params_cfg.mid),
+                    'high': vars(params_cfg.high),
+                },
+                learnable=vars(learnable_cfg),
+            ).to(device)
         print(f'  ├─ 像差网络: AberrationNet (hidden_dim={config.aberration_net.mlp.hidden_dim})')
     use_physics_injection = use_physical_layer and getattr(config.restoration_net, 'use_physics_injection', False)
     n_coeffs = config.aberration_net.n_coeffs if use_physics_injection else 0
@@ -30,7 +58,7 @@ def build_models_from_config(config: Config, device: str):
     if use_physical_layer:
         if aberration_net is None or zernike_gen is None:
             raise RuntimeError('Physical layer requested but required components are missing.')
-        physical_layer = SpatiallyVaryingPhysicalLayer(aberration_net=aberration_net, zernike_generator=zernike_gen, patch_size=config.ola.patch_size, stride=config.ola.stride).to(device)
+        physical_layer = SpatiallyVaryingPhysicalLayer(aberration_net=aberration_net, zernike_generator=zernike_gen, patch_size=config.ola.patch_size, stride=config.ola.stride, newbp_layer=newbp_layer).to(device)
         print(f'  └─ 物理层: OLA (patch={config.ola.patch_size}, stride={config.ola.stride})')
     else:
         print('  └─ 物理层: disabled')
@@ -49,7 +77,7 @@ def build_trainer_from_config(config: Config, restoration_net, physical_layer, d
                 tensorboard_dir = os.path.join(base_dir, config.experiment.name)
             else:
                 tensorboard_dir = os.path.join(config.experiment.output_dir, base_dir, config.experiment.name)
-    trainer = DualBranchTrainer(restoration_net=restoration_net, physical_layer=physical_layer, lr_restoration=config.training.optimizer.lr_restoration, lr_optics=config.training.optimizer.lr_optics, optimizer_type=getattr(config.training.optimizer, 'type', 'adamw'), weight_decay=getattr(config.training.optimizer, 'weight_decay', 0.0), lambda_sup=config.training.loss.lambda_sup, lambda_fft=getattr(config.training.loss, 'lambda_fft', 0.1), lambda_coeff=config.training.loss.lambda_coeff, lambda_smooth=config.training.loss.lambda_smooth, lambda_image_reg=config.training.loss.lambda_image_reg, grad_clip_restoration=getattr(config.training.gradient_clip, 'restoration', 5.0), grad_clip_optics=getattr(config.training.gradient_clip, 'optics', 1.0), stage_schedule=config.training.stage_schedule, stage_weights=config.training.stage_weights, smoothness_grid_size=config.training.smoothness_grid_size, use_amp=getattr(config.training, 'use_amp', True), amp_dtype=getattr(config.training, 'amp_dtype', 'float16'), accumulation_steps=accumulation_steps, device=device, tensorboard_dir=tensorboard_dir)
+    trainer = DualBranchTrainer(restoration_net=restoration_net, physical_layer=physical_layer, lr_restoration=config.training.optimizer.lr_restoration, lr_optics=config.training.optimizer.lr_optics, optimizer_type=getattr(config.training.optimizer, 'type', 'adamw'), weight_decay=getattr(config.training.optimizer, 'weight_decay', 0.0), lambda_sup=config.training.loss.lambda_sup, lambda_fft=getattr(config.training.loss, 'lambda_fft', 0.1), lambda_coeff=config.training.loss.lambda_coeff, lambda_smooth=config.training.loss.lambda_smooth, lambda_image_reg=config.training.loss.lambda_image_reg, grad_clip_restoration=getattr(config.training.gradient_clip, 'restoration', 5.0), grad_clip_optics=getattr(config.training.gradient_clip, 'optics', 1.0), stage_schedule=config.training.stage_schedule, stage_weights=config.training.stage_weights, smoothness_grid_size=config.training.smoothness_grid_size, use_amp=getattr(config.training, 'use_amp', True), amp_dtype=getattr(config.training, 'amp_dtype', 'float16'), accumulation_steps=accumulation_steps, keep_coeff_loss=getattr(config.training, 'keep_coeff_loss', True), keep_smooth_loss=getattr(config.training, 'keep_smooth_loss', True), device=device, tensorboard_dir=tensorboard_dir)
     return trainer
 
 def build_dataloader_from_config(config: Config, mode: str='train'):

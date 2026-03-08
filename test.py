@@ -144,6 +144,8 @@ def main():
     restoration_net.load_state_dict(restoration_state, strict=True)
     if aberration_net is not None and 'aberration_net' in checkpoint:
         aberration_net.load_state_dict(checkpoint['aberration_net'])
+    if physical_layer is not None and 'physical_layer' in checkpoint:
+        physical_layer.load_state_dict(checkpoint['physical_layer'], strict=False)
     restoration_net.eval()
     if physical_layer is not None:
         physical_layer.eval()

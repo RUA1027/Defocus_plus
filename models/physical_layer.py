@@ -8,10 +8,11 @@ from .aberration_net import AberrationNet
 
 class SpatiallyVaryingPhysicalLayer(nn.Module):
 
-    def __init__(self, aberration_net: nn.Module, zernike_generator: DifferentiableZernikeGenerator, patch_size, stride):
+    def __init__(self, aberration_net: nn.Module, zernike_generator: DifferentiableZernikeGenerator, patch_size, stride, newbp_layer: nn.Module=None):
         super().__init__()
         self.aberration_net = aberration_net
         self.zernike_generator = zernike_generator
+        self.newbp_layer = newbp_layer
         self.patch_size = patch_size
         self.stride = stride
         self.kernel_size = zernike_generator.kernel_size
@@ -52,6 +53,10 @@ class SpatiallyVaryingPhysicalLayer(nn.Module):
         (grid_y, grid_x) = torch.meshgrid(y, x, indexing='ij')
         coords = torch.stack([grid_y.flatten(), grid_x.flatten()], dim=1)
         coeffs = self.aberration_net(coords)
+        if self.newbp_layer is not None:
+            coeffs_grid = coeffs.view(1, grid_size, grid_size, -1)
+            coeffs_grid = self.newbp_layer(coeffs_grid)
+            coeffs = coeffs_grid.view(grid_size * grid_size, -1)
         coeffs_map = coeffs.view(grid_size, grid_size, -1).permute(2, 0, 1)
         dy = torch.abs(coeffs_map[:, 1:, :] - coeffs_map[:, :-1, :]).mean()
         dx = torch.abs(coeffs_map[:, :, 1:] - coeffs_map[:, :, :-1]).mean()
@@ -83,6 +88,8 @@ class SpatiallyVaryingPhysicalLayer(nn.Module):
                 all_coeffs = self.aberration_net(all_coords_cat)
                 n_coeffs = all_coeffs.shape[1]
                 all_coeffs = all_coeffs.view(batch_size, grid_size, grid_size, n_coeffs)
+                if self.newbp_layer is not None:
+                    all_coeffs = self.newbp_layer(all_coeffs)
                 all_coeffs = all_coeffs.permute(0, 3, 1, 2)
                 coeffs_map = F.interpolate(all_coeffs, size=(H, W), mode='bilinear', align_corners=True)
             else:
@@ -92,7 +99,10 @@ class SpatiallyVaryingPhysicalLayer(nn.Module):
                 coords = torch.stack([gy.flatten(), gx.flatten()], dim=1)
                 coeffs = self.aberration_net(coords)
                 n_coeffs = coeffs.shape[1]
-                cmap = coeffs.view(1, grid_size, grid_size, n_coeffs).permute(0, 3, 1, 2)
+                coeffs_grid = coeffs.view(1, grid_size, grid_size, n_coeffs)
+                if self.newbp_layer is not None:
+                    coeffs_grid = self.newbp_layer(coeffs_grid)
+                cmap = coeffs_grid.permute(0, 3, 1, 2)
                 cmap = F.interpolate(cmap, size=(H, W), mode='bilinear', align_corners=True)
                 coeffs_map = cmap.expand(batch_size, -1, -1, -1)
             return coeffs_map
@@ -143,6 +153,12 @@ class SpatiallyVaryingPhysicalLayer(nn.Module):
             coords_1img = self.get_patch_centers(H_pad, W_pad, x_hat.device)
             coords = coords_1img.repeat(B, 1)
         coeffs = self.aberration_net(coords)
+        if self.newbp_layer is not None:
+            n_h = (H_pad - P) // S + 1
+            n_w = (W_pad - P) // S + 1
+            coeffs = coeffs.view(B, n_h, n_w, -1)
+            coeffs = self.newbp_layer(coeffs)
+            coeffs = coeffs.view(B * N_patches, -1)
         kernels = self.zernike_generator(coeffs)
         C_k = kernels.shape[1]
         if C == C_k:
@@ -190,3 +206,8 @@ class SpatiallyVaryingPhysicalLayer(nn.Module):
         y_hat = y_hat_padded[..., :H, :W]
         y_hat = y_hat.clamp(min=self.epsilon).pow(1.0 / self.gamma)
         return y_hat
+
+    def get_newbp_stats(self):
+        if self.newbp_layer is None or not hasattr(self.newbp_layer, 'get_last_stats'):
+            return {}
+        return self.newbp_layer.get_last_stats()

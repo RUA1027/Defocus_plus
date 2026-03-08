@@ -17,13 +17,14 @@ class FourierFeatureEncoding(nn.Module):
 
 class AberrationNet(nn.Module):
 
-    def __init__(self, num_coeffs, hidden_dim, a_max, use_fourier=True):
+    def __init__(self, num_coeffs, hidden_dim, a_max, use_fourier=True, fourier_scale=5, output_raw=False):
         super().__init__()
         self.num_coeffs = num_coeffs
         self.a_max = a_max
         self.use_fourier = use_fourier
+        self.output_raw = output_raw
         if use_fourier:
-            self.encoding = FourierFeatureEncoding(input_dim=2, mapping_size=hidden_dim // 2, scale=5)
+            self.encoding = FourierFeatureEncoding(input_dim=2, mapping_size=hidden_dim // 2, scale=fourier_scale)
             in_dim = hidden_dim
         else:
             in_dim = 2
@@ -37,5 +38,7 @@ class AberrationNet(nn.Module):
         else:
             features = coords
         raw_coeffs = self.net(features)
+        if self.output_raw:
+            return raw_coeffs
         coeffs = self.a_max * torch.tanh(raw_coeffs)
         return coeffs

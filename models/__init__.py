@@ -2,3 +2,4 @@ from .zernike import ZernikeBasis, DifferentiableZernikeGenerator, noll_to_nm
 from .aberration_net import AberrationNet, FourierFeatureEncoding
 from .restoration_net import RestorationNet
 from .physical_layer import SpatiallyVaryingPhysicalLayer
+from .local_grouped_newbp import LocalGroupedZernikeNewBP
