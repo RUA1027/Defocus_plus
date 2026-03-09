@@ -83,6 +83,7 @@ class NewBPParamsConfig:
 class NewBPConfig:
     implementation: str = 'native_autograd'
     separate_special_group: bool = True
+    special_use_neighborhood: bool = False
     groups: NewBPGroupsConfig = field(default_factory=NewBPGroupsConfig)
     params: NewBPParamsConfig = field(default_factory=NewBPParamsConfig)
     learnable: NewBPLearnableConfig = field(default_factory=NewBPLearnableConfig)
@@ -319,6 +320,7 @@ def _build_config_from_dict(data: Dict[str, Any]) -> Config:
     newbp = NewBPConfig(
         implementation=nb_data.get('implementation', 'native_autograd'),
         separate_special_group=nb_data.get('separate_special_group', True),
+        special_use_neighborhood=nb_data.get('special_use_neighborhood', False),
         groups=nb_groups,
         params=nb_params,
         learnable=nb_learnable,

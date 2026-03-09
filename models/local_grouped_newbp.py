@@ -78,95 +78,8 @@ class LocalGroupedZernikeNewBPFunction(torch.autograd.Function):
         special_alpha,
         special_amax,
         special_eps,
-        low_bias,
-        low_alpha,
-        low_amax,
-        low_eps,
-        low_gss,
-        low_p_sat,
-        mid_bias,
-        mid_alpha,
-        mid_amax,
-        mid_eps,
-        mid_gss,
-        mid_p_sat,
-        high_bias,
-        high_alpha,
-        high_amax,
-        high_eps,
-        high_gss,
-        high_p_sat,
-        groups_tensor,
-        local_joint_enabled,
-        special_use_neighborhood,
-        padding_mode_idx,
-    ):
-        groups = {
-            "special": groups_tensor[0].tolist(),
-            "low": groups_tensor[1].tolist(),
-            "mid": groups_tensor[2].tolist(),
-            "high": groups_tensor[3].tolist(),
-        }
-        groups = {k: [i for i in v if i >= 0] for k, v in groups.items()}
-        padding_mode = ["replicate", "reflect", "zeros"][int(padding_mode_idx.item())]
-
-        out = raw_coeffs.clone()
-
-        sidx = groups["special"]
-        z_special = raw_coeffs[..., sidx]
-        u_special = z_special + special_bias.view(1, 1, 1, 1)
-        out_special = special_amax.view(1, 1, 1, 1) * torch.tanh(special_alpha.view(1, 1, 1, 1) * u_special)
-        out[..., sidx] = out_special
-
-        if bool(local_joint_enabled.item()):
-            for name, bias, alpha, amax, eps, gss, p_sat in (
-                ("low", low_bias, low_alpha, low_amax, low_eps, low_gss, low_p_sat),
-                ("mid", mid_bias, mid_alpha, mid_amax, mid_eps, mid_gss, mid_p_sat),
-                ("high", high_bias, high_alpha, high_amax, high_eps, high_gss, high_p_sat),
-            ):
-                idx = groups[name]
-                gout, _, _ = _group_forward_core(raw_coeffs[..., idx], bias, alpha, amax, eps, gss, p_sat, padding_mode)
-                out[..., idx] = gout
-
-        # Save tensors for backward; actual gradient is recomputed by autograd on core ops.
-        ctx.save_for_backward(
-            raw_coeffs,
-            special_bias,
-            special_alpha,
-            special_amax,
-            special_eps,
-            low_bias,
-            low_alpha,
-            low_amax,
-            low_eps,
-            low_gss,
-            low_p_sat,
-            mid_bias,
-            mid_alpha,
-            mid_amax,
-            mid_eps,
-            mid_gss,
-            mid_p_sat,
-            high_bias,
-            high_alpha,
-            high_amax,
-            high_eps,
-            high_gss,
-            high_p_sat,
-            groups_tensor,
-            local_joint_enabled,
-            special_use_neighborhood,
-            padding_mode_idx,
-        )
-        return out
-
-    @staticmethod
-    def _forward_no_ctx(
-        raw_coeffs,
-        special_bias,
-        special_alpha,
-        special_amax,
-        special_eps,
+        special_gss,
+        special_p_sat,
         low_bias,
         low_alpha,
         low_amax,
@@ -211,14 +124,14 @@ class LocalGroupedZernikeNewBPFunction(torch.autograd.Function):
                 special_alpha,
                 special_amax,
                 special_eps,
-                torch.ones_like(special_amax),
-                torch.ones_like(special_amax),
+                special_gss,
+                special_p_sat,
                 padding_mode,
             )
-            out[..., sidx] = sp_out
+            out[..., sidx] = sp_out.to(out.dtype)
         else:
             out_special = special_amax.view(1, 1, 1, 1) * torch.tanh(special_alpha.view(1, 1, 1, 1) * u_special)
-            out[..., sidx] = out_special
+            out[..., sidx] = out_special.to(out.dtype)
 
         if bool(local_joint_enabled.item()):
             for name, bias, alpha, amax, eps, gss, p_sat in (
@@ -228,7 +141,113 @@ class LocalGroupedZernikeNewBPFunction(torch.autograd.Function):
             ):
                 idx = groups[name]
                 gout, _, _ = _group_forward_core(raw_coeffs[..., idx], bias, alpha, amax, eps, gss, p_sat, padding_mode)
-                out[..., idx] = gout
+                out[..., idx] = gout.to(out.dtype)
+
+        # Save tensors for backward; actual gradient is recomputed by autograd on core ops.
+        ctx.save_for_backward(
+            raw_coeffs,
+            special_bias,
+            special_alpha,
+            special_amax,
+            special_eps,
+            special_gss,
+            special_p_sat,
+            low_bias,
+            low_alpha,
+            low_amax,
+            low_eps,
+            low_gss,
+            low_p_sat,
+            mid_bias,
+            mid_alpha,
+            mid_amax,
+            mid_eps,
+            mid_gss,
+            mid_p_sat,
+            high_bias,
+            high_alpha,
+            high_amax,
+            high_eps,
+            high_gss,
+            high_p_sat,
+            groups_tensor,
+            local_joint_enabled,
+            special_use_neighborhood,
+            padding_mode_idx,
+        )
+        return out
+
+    @staticmethod
+    def _forward_no_ctx(
+        raw_coeffs,
+        special_bias,
+        special_alpha,
+        special_amax,
+        special_eps,
+        special_gss,
+        special_p_sat,
+        low_bias,
+        low_alpha,
+        low_amax,
+        low_eps,
+        low_gss,
+        low_p_sat,
+        mid_bias,
+        mid_alpha,
+        mid_amax,
+        mid_eps,
+        mid_gss,
+        mid_p_sat,
+        high_bias,
+        high_alpha,
+        high_amax,
+        high_eps,
+        high_gss,
+        high_p_sat,
+        groups_tensor,
+        local_joint_enabled,
+        special_use_neighborhood,
+        padding_mode_idx,
+    ):
+        groups = {
+            "special": groups_tensor[0].tolist(),
+            "low": groups_tensor[1].tolist(),
+            "mid": groups_tensor[2].tolist(),
+            "high": groups_tensor[3].tolist(),
+        }
+        groups = {k: [i for i in v if i >= 0] for k, v in groups.items()}
+        padding_mode = ["replicate", "reflect", "zeros"][int(padding_mode_idx.item())]
+
+        out = raw_coeffs.clone()
+
+        sidx = groups["special"]
+        z_special = raw_coeffs[..., sidx]
+        u_special = z_special + special_bias.view(1, 1, 1, 1)
+        if bool(special_use_neighborhood.item()) and bool(local_joint_enabled.item()):
+            sp_out, _, _ = _group_forward_core(
+                z_special,
+                special_bias,
+                special_alpha,
+                special_amax,
+                special_eps,
+                special_gss,
+                special_p_sat,
+                padding_mode,
+            )
+            out[..., sidx] = sp_out.to(out.dtype)
+        else:
+            out_special = special_amax.view(1, 1, 1, 1) * torch.tanh(special_alpha.view(1, 1, 1, 1) * u_special)
+            out[..., sidx] = out_special.to(out.dtype)
+
+        if bool(local_joint_enabled.item()):
+            for name, bias, alpha, amax, eps, gss, p_sat in (
+                ("low", low_bias, low_alpha, low_amax, low_eps, low_gss, low_p_sat),
+                ("mid", mid_bias, mid_alpha, mid_amax, mid_eps, mid_gss, mid_p_sat),
+                ("high", high_bias, high_alpha, high_amax, high_eps, high_gss, high_p_sat),
+            ):
+                idx = groups[name]
+                gout, _, _ = _group_forward_core(raw_coeffs[..., idx], bias, alpha, amax, eps, gss, p_sat, padding_mode)
+                out[..., idx] = gout.to(out.dtype)
         return out
 
     @staticmethod
@@ -240,6 +259,8 @@ class LocalGroupedZernikeNewBPFunction(torch.autograd.Function):
             special_alpha,
             special_amax,
             special_eps,
+            special_gss,
+            special_p_sat,
             low_bias,
             low_alpha,
             low_amax,
@@ -272,6 +293,8 @@ class LocalGroupedZernikeNewBPFunction(torch.autograd.Function):
                 bool(special_alpha.requires_grad),
                 bool(special_amax.requires_grad),
                 bool(special_eps.requires_grad),
+                bool(special_gss.requires_grad),
+                bool(special_p_sat.requires_grad),
                 bool(low_bias.requires_grad),
                 bool(low_alpha.requires_grad),
                 bool(low_amax.requires_grad),
@@ -297,6 +320,8 @@ class LocalGroupedZernikeNewBPFunction(torch.autograd.Function):
                 special_alpha.detach().requires_grad_(True),
                 special_amax.detach().requires_grad_(True),
                 special_eps.detach().requires_grad_(True),
+                special_gss.detach().requires_grad_(True),
+                special_p_sat.detach().requires_grad_(True),
                 low_bias.detach().requires_grad_(True),
                 low_alpha.detach().requires_grad_(True),
                 low_amax.detach().requires_grad_(True),
@@ -341,6 +366,8 @@ class LocalGroupedZernikeNewBPFunction(torch.autograd.Function):
                 inputs[20],
                 inputs[21],
                 inputs[22],
+                inputs[23],
+                inputs[24],
                 groups_tensor,
                 local_joint_enabled,
                 special_use_neighborhood,
@@ -381,6 +408,8 @@ class LocalGroupedZernikeNewBPFunction(torch.autograd.Function):
             grads[20],
             grads[21],
             grads[22],
+            grads[23],
+            grads[24],
             None,
             None,
             None,
@@ -490,11 +519,11 @@ class LocalGroupedZernikeNewBP(nn.Module):
                 self.special_p_sat,
                 self.padding_mode,
             )
-            out[..., sidx] = sp_out
+            out[..., sidx] = sp_out.to(out.dtype)
             stats_tensors["gain_special"] = sp_gain
             stats_tensors["energy_special"] = sp_s
         else:
-            out[..., sidx] = self.special_amax.view(1, 1, 1, 1) * torch.tanh(self.special_alpha.view(1, 1, 1, 1) * u_special)
+            out[..., sidx] = (self.special_amax.view(1, 1, 1, 1) * torch.tanh(self.special_alpha.view(1, 1, 1, 1) * u_special)).to(out.dtype)
 
         if self.local_joint_enabled:
             for name in ["low", "mid", "high"]:
@@ -509,7 +538,7 @@ class LocalGroupedZernikeNewBP(nn.Module):
                     getattr(self, f"{name}_p_sat"),
                     self.padding_mode,
                 )
-                out[..., idx] = gout
+                out[..., idx] = gout.to(out.dtype)
                 stats_tensors[f"gain_{name}"] = gain
                 stats_tensors[f"energy_{name}"] = s
 
@@ -533,9 +562,9 @@ class LocalGroupedZernikeNewBP(nn.Module):
                 abs_g = g.abs().reshape(-1)
                 st[f"group_{name}_mean"] = float(g.mean().item())
                 st[f"group_{name}_abs_mean"] = float(abs_g.mean().item())
-                st[f"group_{name}_p50"] = float(torch.quantile(abs_g, 0.50).item())
-                st[f"group_{name}_p90"] = float(torch.quantile(abs_g, 0.90).item())
-                st[f"group_{name}_p99"] = float(torch.quantile(abs_g, 0.99).item())
+                st[f"group_{name}_p50"] = float(torch.quantile(abs_g.to(torch.float32), 0.50).item())
+                st[f"group_{name}_p90"] = float(torch.quantile(abs_g.to(torch.float32), 0.90).item())
+                st[f"group_{name}_p99"] = float(torch.quantile(abs_g.to(torch.float32), 0.99).item())
             for key, value in stats_tensors.items():
                 st[f"{key}_mean"] = float(value.mean().item())
                 st[f"{key}_std"] = float(value.std().item())
@@ -556,6 +585,8 @@ class LocalGroupedZernikeNewBP(nn.Module):
                 self.special_alpha,
                 self.special_amax,
                 self.special_eps,
+                self.special_gss,
+                self.special_p_sat,
                 self.low_bias,
                 self.low_alpha,
                 self.low_amax,

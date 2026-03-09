@@ -39,7 +39,7 @@ aberration_net:
   # 通用参数
   # 必须与 physics.n_modes 保持一致
   n_coeffs: 36                   # 输出 Zernike 系数数量
-  a_max: 1.5                     # 系数约束范围 [-a_max, a_max]
+  a_max: 1.0                    # 系数约束范围 [-a_max, a_max]
   use_local_grouped_newbp: true
 
   local_joint_input:
@@ -50,6 +50,7 @@ aberration_net:
   newbp:
     implementation: "native_autograd"
     separate_special_group: true
+    special_use_neighborhood: false  # true enables 3x3 local coupling for Noll 1-3.
     groups:
       special: [1, 2, 3]
       low: [4, 5, 6]
@@ -58,19 +59,19 @@ aberration_net:
     params:
       special:
         alpha: 1.0
-        amax: 0.35
+        amax: 0.30
         bias: 0.0
         eps: 1.0e-6
       low:
         alpha: 1.0
-        amax: 0.30
+        amax: 0.40
         bias: 0.0
         eps: 1.0e-6
         gss: 1.0
         p_sat: 4.0
       mid:
         alpha: 1.0
-        amax: 0.18
+        amax: 0.20
         bias: 0.0
         eps: 1.0e-6
         gss: 1.0
@@ -100,7 +101,7 @@ aberration_net:
     use_fourier: true            # 是否使用傅里叶特征编码
     # 将 2 维坐标映射到高维空间,用 Fourier Encoding 解决坐标输入的频谱缺陷.
     fourier_scale: 5             # 傅里叶特征缩放因子
-    a_max_mlp: 1.5               # MLP 版本的系数范围
+    a_max_mlp: 1.0               # MLP 版本的系数范围
 
 
 # -----------------------------------------------------------------------------
@@ -129,7 +130,7 @@ training:
   # 优化器
   optimizer:
     type: "adamw"                # 优化器类型
-    lr_restoration: 5.0e-5       # 复原网络学习率
+    lr_restoration: 1.0e-4       # 复原网络学习率
     lr_optics: 1.0e-5            # 像差网络学习率
     weight_decay: 0.01           # 权重衰减
   
@@ -161,8 +162,8 @@ training:
       w_img_reg: 0.001              # 复原图像加点全变分正则
       
     joint:                          # 第三阶段：一起微调
-      w_data: 0.3
-      w_sup: 1.0                    # 图像监督 (Charbonnier + lambda_fft * FFT)
+      w_data: 0.4
+      w_sup: 1.2                    # 图像监督 (Charbonnier + lambda_fft * FFT)
       w_smooth: 0.0
       w_coeff: 0.0
       w_img_reg: 0.0001
@@ -178,10 +179,10 @@ training:
   accumulation_steps: 4          # 梯度累积步数，模拟更大的 Batch Size
 
   # 三阶段训练计划 (Stage 1/2/3)
-  # 总计 300 Epochs: 50 + 200 + 50
+  # 总计 300 Epochs: 50 + 100 + 50
   stage_schedule:
-    stage1_epochs: 20              # Stage 1: Physics Only (物理层单独训练)
-    stage2_epochs: 80            # Stage 2: Restoration with Fixed Physics (复原网络训练)
+    stage1_epochs: 50              # Stage 1: Physics Only (物理层单独训练)
+    stage2_epochs: 100            # Stage 2: Restoration with Fixed Physics (复原网络训练)
     stage3_epochs: 50             # Stage 3: Joint Fine-tuning (联合微调，学习率减半)
   
   # 正则化采样
@@ -234,18 +235,18 @@ visualization:
 # 实验配置 (Experiment)
 # -----------------------------------------------------------------------------
 experiment:
-  name: "dpdd_physics_driven_train_3"    # 实验名称
+  name: "dpdd_physics_driven_train_001"    # 实验名称
   seed: 42                       # 随机种子
   device: "cuda"                 # 计算设备: "cuda" 或 "cpu"
   use_physical_layer: true       # 是否启用物理层
-  epochs: 150                    # 训练轮数 (= stage1 + stage2 + stage3 = 5+200+50)
-  save_interval: 10               # 定期存档间隔 (epochs) - 修改为更频繁，防止意外丢失
+  epochs: 200                    # 训练轮数 (= stage1 + stage2 + stage3 = 5+100+50)
+  save_interval: 5               # 定期存档间隔 (epochs) - 修改为更频繁，防止意外丢失
   log_interval: 1                # 日志间隔 (epochs)
-  output_dir: "/root/autodl-nas/Defocus_with_NewBP/experiments_3_STF"  # 输出目录 (AutoDL 网盘)
+  output_dir: "/root/autodl-nas/Defocus_with_NewBP/experiments_001_NewBP—Zernike"  # 输出目录 (AutoDL 网盘)
   run_name: ""                   # 可选: 固定实验目录名 (留空则使用 name)
   use_timestamp: true            # 是否追加时间戳
   timestamp_format: "%m%d_%H%M"  # 时间戳格式
-  checkpoints_subdir: "checkpoints_3"  # checkpoint 子目录
+  checkpoints_subdir: "checkpoints_001"  # checkpoint 子目录
   
   # TensorBoard 配置
   tensorboard:

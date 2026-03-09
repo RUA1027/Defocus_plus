@@ -39,6 +39,7 @@ def build_models_from_config(config: Config, device: str):
                 padding_mode=getattr(config.aberration_net.local_joint_input, 'padding_mode', 'replicate'),
                 implementation=getattr(config.aberration_net.newbp, 'implementation', 'native_autograd'),
                 separate_special_group=getattr(config.aberration_net.newbp, 'separate_special_group', True),
+                special_use_neighborhood=getattr(config.aberration_net.newbp, 'special_use_neighborhood', False),
                 params={
                     'special': vars(params_cfg.special),
                     'low': vars(params_cfg.low),
