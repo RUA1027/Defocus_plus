@@ -9,7 +9,7 @@ from models.restoration_net import RestorationNet
 from models.physical_layer import SpatiallyVaryingPhysicalLayer
 from models.local_grouped_newbp import LocalGroupedZernikeNewBP
 from trainer import DualBranchTrainer
-from utils.dpdd_dataset import DPDDDataset, DPDDTestDataset
+from utils.dpdd_dataset import DPDDDataset, DPDDTestDataset, GenericPairedTestDataset, BlurOnlyTestDataset
 from torch.utils.data import DataLoader
 
 def build_models_from_config(config: Config, device: str):
@@ -101,3 +101,58 @@ def build_test_dataloader_from_config(config: Config):
     dataset = DPDDTestDataset(root_dir=config.data.data_root, transform=None)
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=config.data.num_workers, pin_memory=True if config.experiment.device == 'cuda' else False)
     return loader
+
+
+# ---------------------------------------------------------------------------
+# 数据集类型 → (默认路径, Dataset 类, 是否有 GT) 的映射
+# ---------------------------------------------------------------------------
+DATASET_TYPE_REGISTRY = {
+    'dpdd':       {'default_root': './data/dd_dp_dataset_png',        'cls': 'dpdd_test',   'has_gt': True},
+    'dpdd_pixel': {'default_root': './data/dd_dp_dataset_pixel/test_c', 'cls': 'generic_paired', 'has_gt': True},
+    'realdof':    {'default_root': './data/RealDOF',                  'cls': 'generic_paired', 'has_gt': True},
+    'extreme':    {'default_root': './data/extreme aberration',       'cls': 'generic_paired', 'has_gt': True},
+    'cuhk':       {'default_root': './data/CUHK',                     'cls': 'blur_only',   'has_gt': False},
+}
+
+def get_supported_dataset_types():
+    """返回所有支持的数据集类型名称列表。"""
+    return list(DATASET_TYPE_REGISTRY.keys())
+
+def build_test_dataloader_by_type(dataset_type: str, config: Config, data_root_override: str = None):
+    """根据数据集类型构建测试 DataLoader。
+
+    Args:
+        dataset_type: 数据集类型 (dpdd / dpdd_pixel / realdof / extreme / cuhk)
+        config: 全局配置对象
+        data_root_override: 覆盖默认数据路径 (可选)
+
+    Returns:
+        (DataLoader, has_gt: bool) 元组
+    """
+    if dataset_type not in DATASET_TYPE_REGISTRY:
+        raise ValueError(
+            f"Unknown dataset_type '{dataset_type}'. "
+            f"Supported: {get_supported_dataset_types()}")
+
+    info = DATASET_TYPE_REGISTRY[dataset_type]
+    root = data_root_override if data_root_override is not None else info['default_root']
+    has_gt = info['has_gt']
+    cls_key = info['cls']
+
+    if cls_key == 'dpdd_test':
+        dataset = DPDDTestDataset(root_dir=root, transform=None)
+        collate_fn = None
+    elif cls_key == 'generic_paired':
+        dataset = GenericPairedTestDataset(root_dir=root, transform=None)
+        collate_fn = None
+    elif cls_key == 'blur_only':
+        dataset = BlurOnlyTestDataset(root_dir=root, transform=None)
+        collate_fn = BlurOnlyTestDataset.collate_fn
+    else:
+        raise RuntimeError(f"Internal error: unknown cls_key '{cls_key}'")
+
+    pin_memory = config.experiment.device == 'cuda'
+    loader = DataLoader(dataset, batch_size=1, shuffle=False,
+                        num_workers=config.data.num_workers, pin_memory=pin_memory,
+                        collate_fn=collate_fn)
+    return loader, has_gt

@@ -145,3 +145,92 @@ class DPDDTestDataset(Dataset):
         blur_tensor = self.transform(blur_img)
         sharp_tensor = self.transform(sharp_img)
         return {'blur': blur_tensor, 'sharp': sharp_tensor, 'crop_info': crop_info, 'filename': blur_filename, 'original_size': (H_orig, W_orig)}
+
+
+class GenericPairedTestDataset(Dataset):
+    """通用配对测试数据集，直接加载 {root}/source/ 和 {root}/target/。
+    适用于 RealDOF、extreme aberration、dpdd_pixel 等非标准 DPDD 目录结构。"""
+
+    def __init__(self, root_dir, transform=None):
+        super().__init__()
+        self.root_dir = root_dir
+        if transform is None:
+            self.transform = transforms.Compose([transforms.ToTensor()])
+        else:
+            self.transform = transform
+        self.blur_dir = os.path.join(root_dir, 'source')
+        self.sharp_dir = os.path.join(root_dir, 'target')
+        if not os.path.exists(self.blur_dir) or not os.path.exists(self.sharp_dir):
+            raise FileNotFoundError(
+                f"Source or Target directory not found in {root_dir}. "
+                f"Expected 'source' and 'target' subdirectories.")
+        valid_exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff')
+        self.blur_files = sorted([f for f in os.listdir(self.blur_dir) if f.lower().endswith(valid_exts)])
+        self.sharp_files = sorted([f for f in os.listdir(self.sharp_dir) if f.lower().endswith(valid_exts)])
+        if len(self.blur_files) != len(self.sharp_files):
+            raise ValueError(
+                f'Mismatch: {len(self.blur_files)} source vs {len(self.sharp_files)} target in {root_dir}')
+        print(f'[GenericPairedTestDataset] Loaded {len(self.blur_files)} paired images from {root_dir}')
+
+    def __len__(self):
+        return len(self.blur_files)
+
+    def __getitem__(self, idx):
+        blur_filename = self.blur_files[idx]
+        sharp_filename = self.sharp_files[idx]
+        blur_img = Image.open(os.path.join(self.blur_dir, blur_filename)).convert('RGB')
+        sharp_img = Image.open(os.path.join(self.sharp_dir, sharp_filename)).convert('RGB')
+        (W_orig, H_orig) = blur_img.size
+        crop_info = torch.tensor([0.0, 0.0, 1.0, 1.0], dtype=torch.float32)
+        return {
+            'blur': self.transform(blur_img),
+            'sharp': self.transform(sharp_img),
+            'crop_info': crop_info,
+            'filename': blur_filename,
+            'original_size': (H_orig, W_orig),
+        }
+
+
+class BlurOnlyTestDataset(Dataset):
+    """无 GT 测试数据集（如 CUHK），仅加载散焦模糊图像。
+    支持扁平目录结构（图片直接放在 root_dir 下）。"""
+
+    def __init__(self, root_dir, transform=None):
+        super().__init__()
+        self.root_dir = root_dir
+        if transform is None:
+            self.transform = transforms.Compose([transforms.ToTensor()])
+        else:
+            self.transform = transform
+        valid_exts = ('.png', '.jpg', '.jpeg', '.tif', '.tiff')
+        self.blur_files = sorted([f for f in os.listdir(root_dir) if f.lower().endswith(valid_exts)])
+        if len(self.blur_files) == 0:
+            raise FileNotFoundError(f'No images found in {root_dir}')
+        print(f'[BlurOnlyTestDataset] Loaded {len(self.blur_files)} images (no GT) from {root_dir}')
+
+    def __len__(self):
+        return len(self.blur_files)
+
+    def __getitem__(self, idx):
+        blur_filename = self.blur_files[idx]
+        blur_img = Image.open(os.path.join(self.root_dir, blur_filename)).convert('RGB')
+        (W_orig, H_orig) = blur_img.size
+        crop_info = torch.tensor([0.0, 0.0, 1.0, 1.0], dtype=torch.float32)
+        return {
+            'blur': self.transform(blur_img),
+            'sharp': None,
+            'crop_info': crop_info,
+            'filename': blur_filename,
+            'original_size': (H_orig, W_orig),
+        }
+
+    @staticmethod
+    def collate_fn(batch):
+        """Custom collate function to handle sharp=None."""
+        return {
+            'blur': torch.stack([item['blur'] for item in batch]),
+            'sharp': None,  # No ground truth
+            'crop_info': torch.stack([item['crop_info'] for item in batch]),
+            'filename': [item['filename'] for item in batch],
+            'original_size': [item['original_size'] for item in batch],
+        }

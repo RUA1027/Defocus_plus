@@ -298,7 +298,7 @@ def load_config(config_path: Optional[str]=None, overrides: Optional[List[str]]=
     if overrides:
         config_dict = _apply_overrides(config_dict, overrides)
     config = _build_config_from_dict(config_dict)
-    print(f'✓ 配置已加载: {config_path}')
+    print(f'[OK] 配置已加载: {config_path}')
     return config
 
 def _build_config_from_dict(data: Dict[str, Any]) -> Config:

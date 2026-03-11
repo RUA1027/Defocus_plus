@@ -7,10 +7,11 @@ import torch.nn.functional as F
 
 class PerformanceEvaluator:
 
-    def __init__(self, device: str='cuda', ssim_window: int=11, ssim_sigma: float=1.5):
+    def __init__(self, device: str='cuda', ssim_window: int=11, ssim_sigma: float=1.5, require_lpips: bool=False):
         self.device = device
         self.ssim_window = ssim_window
         self.ssim_sigma = ssim_sigma
+        self.require_lpips = require_lpips
         self._lpips = None
         self._lpips_available = False
         try:
@@ -20,6 +21,8 @@ class PerformanceEvaluator:
         except Exception:
             self._lpips = None
             self._lpips_available = False
+            if self.require_lpips:
+                raise RuntimeError('LPIPS is required but unavailable. Install lpips before evaluation.')
 
     @staticmethod
     def _psnr(x: torch.Tensor, y: torch.Tensor, max_val: float=1.0, eps: float=1e-08) -> torch.Tensor:
