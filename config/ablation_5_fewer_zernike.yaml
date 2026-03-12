@@ -1,0 +1,193 @@
+# =============================================================================
+# 物理驱动盲去卷积网络 - 消融实验 5: 降低 Zernike 模式数量 (仅15阶)
+# =============================================================================
+
+physics:
+  n_modes: 15
+  pupil_size: 129
+  kernel_size: 65
+  oversample_factor: 2
+  
+  ref_wavelength: 550.0e-9
+  wavelengths:                   
+    - 620.0e-9                   
+    - 550.0e-9                   
+    - 450.0e-9                   
+  learnable_wavelengths: true   
+  wavelength_bounds: [380.0e-9, 780.0e-9]  
+
+ola:
+  patch_size: 128                 
+  stride: 64                     
+  pad_to_power_2: true           
+
+aberration_net:
+  n_coeffs: 15
+  a_max: 1.0                    
+  use_local_grouped_newbp: true
+
+  local_joint_input:
+    enabled: true
+    kernel_size: 3
+    padding_mode: "replicate"
+
+  newbp:
+    implementation: "native_autograd"
+    separate_special_group: true
+    special_use_neighborhood: false  
+    groups:
+      special: [1, 2, 3]
+      low: [4, 5, 6]
+      mid: [7, 8, 9, 10, 11, 12, 13, 14, 15]
+    params:
+      special:
+        alpha: 1.0
+        amax: 0.30
+        bias: 0.0
+        eps: 1.0e-6
+      low:
+        alpha: 1.0
+        amax: 0.40
+        bias: 0.0
+        eps: 1.0e-6
+        gss: 1.0
+        p_sat: 4.0
+      mid:
+        alpha: 1.0
+        amax: 0.20
+        bias: 0.0
+        eps: 1.0e-6
+        gss: 1.0
+        p_sat: 2.5
+    learnable:
+      bias: true
+      alpha: false
+      amax: false
+      gss: false
+      p_sat: false
+  
+  mlp:
+    hidden_dim: 512              
+    use_fourier: true            
+    fourier_scale: 5             
+    a_max_mlp: 1.0               
+
+restoration_net:
+  n_channels: 3                  
+  n_classes: 3                   
+  base_filters: 64               
+  bilinear: true                 
+  use_coords: true               
+  use_physics_injection: true     
+  injection_grid_size: 16         
+  
+  channel_multipliers:
+    - 1                          
+    - 2                          
+    - 4                          
+    - 8                          
+    - 8                          
+
+training:
+  optimizer:
+    type: "adamw"                
+    lr_restoration: 1.0e-4       
+    lr_optics: 1.0e-5            
+    weight_decay: 0.01           
+  
+  loss:
+    lambda_sup: 1.0              
+    lambda_fft: 0.01              
+    lambda_coeff: 0.0            
+    lambda_smooth: 0.0           
+    lambda_image_reg: 0.001      
+
+  keep_coeff_loss: false
+  keep_smooth_loss: false
+  
+  stage_weights:
+    physics_only:                   
+      w_data: 1.0
+      w_smooth: 0.0
+      w_coeff: 0.0
+      w_img_reg: 0.0
+    
+    restoration_fixed_physics:      
+      w_data: 0.2                   
+      w_sup: 1.2                    
+      w_smooth: 0.0                 
+      w_coeff: 0.0
+      w_img_reg: 0.001              
+      
+    joint:                          
+      w_data: 0.4
+      w_sup: 1.2                    
+      w_smooth: 0.0
+      w_coeff: 0.0
+      w_img_reg: 0.0001
+  
+  gradient_clip:
+    restoration: 5.0             
+    optics: 1.0                  
+
+  accumulation_steps: 4          
+
+  stage_schedule:
+    stage1_epochs: 30              
+    stage2_epochs: 80            
+    stage3_epochs: 40             
+  
+  smoothness_grid_size: 16       
+
+data:
+  data_root: "./data/dd_dp_dataset_png"
+  batch_size: 8                 
+  image_height: 1120             
+  image_width: 1680              
+  crop_size: 768                 
+  val_crop_size: 1024            
+  num_workers: 16                 
+  repeat_factor: 30
+  
+  augmentation:
+    random_flip: true            
+    random_rotate90: true        
+
+visualization:
+  psf_grid:
+    rows: 5                      
+    cols: 5                      
+    coord_range: [-0.9, 0.9]     
+    colormap: "inferno"          
+  
+  coeff_maps:
+    grid_size: 128               
+    indices: [3, 4, 5, 6, 11]
+    colormap: "viridis"          
+
+experiment:
+  name: "ablation5_fewer_zernike"    
+  seed: 42                       
+  device: "cuda"                 
+  use_physical_layer: true       
+  epochs: 150                    
+  save_interval: 5               
+  log_interval: 1                
+  output_dir: "/root/autodl-nas/Defocus_with_NewBP/experiments_ablation5"  
+  run_name: ""                   
+  use_timestamp: true            
+  timestamp_format: "%m%d_%H%M"  
+  checkpoints_subdir: "checkpoints_ab5"  
+  
+  tensorboard:
+    enabled: true                
+    log_dir: "runs"              
+    append_run_name: false       
+    log_images: true             
+    image_log_interval: 50       
+
+checkpoint:
+  save_best_per_stage: true
+  stage1_metric: "reblur_mse"    
+  stage2_metric: "psnr"          
+  stage3_metric: "combined"
